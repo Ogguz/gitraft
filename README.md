@@ -1,9 +1,28 @@
-# git-migration-with-history
+# Git Migration with History
 
-Migrate git host without losing any history, tag or commit
+This repository provides tools for moving a Git repository between hosts while
+preserving all commits, branches and tags.  A new Python implementation adds a
+cross‑platform and easily extensible alternative to the original Bash script.
 
-Clone this repo, put the script to the path you want your local clone to be in.
+## Python migration script
 
-Then create an empty repo on target git host. ( without any initial commits! )
+```bash
+python git_migration.py SOURCE_REPO DEST_REPO [options]
+```
 
-All you need to run ./git-migration.sh and provide dest, src git repo urls and the name of the project.
+### Options
+
+- `--branches BR1,BR2` – only migrate the listed branches (default: all)
+- `--tags TAG1,TAG2` – only migrate the listed tags (default: all)
+- `--dry-run` – show commands without executing them
+- `--cleanup` – remove the temporary mirror after pushing
+- `-v/--verbose` – increase log output (use twice for debug)
+
+The script clones the source repository using `--mirror`, optionally filters the
+refs to push, and then pushes them to the destination.  Dry‑run mode prints the
+commands without performing any network operations.  When `--cleanup` is
+specified, the temporary clone is removed on success.
+
+## Legacy Bash script
+
+For reference, the original `git-mirror.sh` script remains in the repository.
