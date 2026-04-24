@@ -1,0 +1,9 @@
+ROADMAP.md
+
+# Go build artifacts
+/dist/
+coverage.out
+*.out
+
+# OS
+.DS_Store
