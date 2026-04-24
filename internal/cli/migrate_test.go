@@ -84,7 +84,7 @@ func TestPickProvider_OverrideMatches(t *testing.T) {
 func TestPickProvider_OverrideUnknownErrors(t *testing.T) {
 	gh := &mockProvider{name: "github", hosts: []string{"github.com"}}
 	u := mustParse(t, "https://github.com/a/b.git")
-	_, err := pickProvider([]provider.Provider{gh}, u, "gihub") // typo
+	_, err := pickProvider([]provider.Provider{gh}, u, "gihub")
 	if err == nil {
 		t.Fatal("expected error for typo'd provider name")
 	}
@@ -222,23 +222,161 @@ func TestAuthURL_WithProviderUsesProvider(t *testing.T) {
 	}
 }
 
-func TestBuildProviders_WarnsWhenTokenUnset(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "")
-	logger, buf := testLogger()
-	ps := buildProviders(logger)
-	if len(ps) != 1 {
-		t.Errorf("expected 1 provider; got %d", len(ps))
+func TestBuildProviders_CreatesBothProviders(t *testing.T) {
+	ps, err := buildProviders("")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(buf.String(), "GITHUB_TOKEN unset") {
-		t.Errorf("expected warning; got %s", buf.String())
+	if len(ps) != 2 {
+		t.Errorf("expected 2 providers; got %d", len(ps))
+	}
+	if provider.ByName(ps, "github") == nil || provider.ByName(ps, "gitlab") == nil {
+		t.Errorf("expected both github and gitlab providers")
 	}
 }
 
-func TestBuildProviders_QuietWhenTokenSet(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "tok")
+func TestBuildProviders_GitLabSelfHostedMatches(t *testing.T) {
+	ps, err := buildProviders("https://gitlab.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gl := provider.ByName(ps, "gitlab")
+	if gl == nil {
+		t.Fatal("gitlab provider missing")
+	}
+	u := mustParse(t, "https://gitlab.example.com/a/b.git")
+	if !gl.Matches(u) {
+		t.Error("self-hosted gitlab should match configured host")
+	}
+	uDefault := mustParse(t, "https://gitlab.com/a/b.git")
+	if gl.Matches(uDefault) {
+		t.Error("self-hosted gitlab should not match gitlab.com")
+	}
+}
+
+func TestBuildProviders_GitLabSelfHostedWithPortMatches(t *testing.T) {
+	// Regression: previously gitlabHost returned Host (with port), but Matches
+	// compared Hostname (without port) — so ":8080" URLs silently never matched.
+	ps, err := buildProviders("https://gitlab.example.com:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gl := provider.ByName(ps, "gitlab")
+	u := mustParse(t, "https://gitlab.example.com:8080/a/b.git")
+	if !gl.Matches(u) {
+		t.Error("self-hosted gitlab on :8080 should match")
+	}
+	uNoPort := mustParse(t, "https://gitlab.example.com/a/b.git")
+	if !gl.Matches(uNoPort) {
+		t.Error("self-hosted gitlab should match same host without port")
+	}
+}
+
+func TestBuildProviders_InvalidGitLabURL(t *testing.T) {
+	_, err := buildProviders("://broken")
+	if err == nil {
+		t.Fatal("expected error for malformed URL")
+	}
+	if !strings.Contains(err.Error(), "invalid --gitlab-url") {
+		t.Errorf("expected 'invalid --gitlab-url' in error; got %v", err)
+	}
+}
+
+func TestGitLabHost(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", "", false},
+		{"https://gitlab.example.com", "gitlab.example.com", false},
+		{"https://gitlab.example.com:8080/path", "gitlab.example.com", false}, // port stripped
+		{"gitlab.example.com", "gitlab.example.com", false},
+		{"gitlab.example.com:8080", "gitlab.example.com", false}, // port stripped
+		{"://broken", "", true},
+		{"https://", "", true}, // no host
+	}
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := gitlabHost(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q", tc.in)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("gitlabHost(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWarnMissingTokens_BothUnset(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GITLAB_TOKEN", "")
 	logger, buf := testLogger()
-	_ = buildProviders(logger)
-	if strings.Contains(buf.String(), "GITHUB_TOKEN unset") {
-		t.Errorf("expected no warning when token set; got %s", buf.String())
+	warnMissingTokens(logger,
+		&mockProvider{name: "github"},
+		&mockProvider{name: "gitlab"},
+	)
+	if !strings.Contains(buf.String(), "GITHUB_TOKEN unset") {
+		t.Errorf("expected GITHUB_TOKEN warning; got %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "GITLAB_TOKEN unset") {
+		t.Errorf("expected GITLAB_TOKEN warning; got %s", buf.String())
+	}
+}
+
+func TestWarnMissingTokens_OnlyWarnsForUsedProviders(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GITLAB_TOKEN", "")
+	logger, buf := testLogger()
+	// Only gitlab is used — GITHUB_TOKEN warning must NOT fire.
+	warnMissingTokens(logger, &mockProvider{name: "gitlab"})
+	if strings.Contains(buf.String(), "GITHUB_TOKEN") {
+		t.Errorf("GITHUB_TOKEN warning must not fire when github isn't used; got %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "GITLAB_TOKEN") {
+		t.Errorf("GITLAB_TOKEN warning expected; got %s", buf.String())
+	}
+}
+
+func TestWarnMissingTokens_Dedup(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	logger, buf := testLogger()
+	// Same provider passed twice — warn only once.
+	warnMissingTokens(logger,
+		&mockProvider{name: "github"},
+		&mockProvider{name: "github"},
+	)
+	count := strings.Count(buf.String(), "GITHUB_TOKEN unset")
+	if count != 1 {
+		t.Errorf("expected exactly 1 GITHUB_TOKEN warning; got %d", count)
+	}
+}
+
+func TestWarnMissingTokens_TokenSetNoWarn(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "x")
+	t.Setenv("GITLAB_TOKEN", "y")
+	logger, buf := testLogger()
+	warnMissingTokens(logger,
+		&mockProvider{name: "github"},
+		&mockProvider{name: "gitlab"},
+	)
+	if strings.Contains(buf.String(), "unset") {
+		t.Errorf("no warnings expected; got %s", buf.String())
+	}
+}
+
+func TestWarnMissingTokens_NilProviderIgnored(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	logger, buf := testLogger()
+	warnMissingTokens(logger, nil, &mockProvider{name: "github"})
+	if !strings.Contains(buf.String(), "GITHUB_TOKEN") {
+		t.Errorf("github warning expected despite nil entry; got %s", buf.String())
 	}
 }

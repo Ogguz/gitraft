@@ -12,6 +12,7 @@ import (
 	"github.com/Ogguz/gitraft/internal/mirror"
 	"github.com/Ogguz/gitraft/internal/provider"
 	"github.com/Ogguz/gitraft/internal/provider/github"
+	"github.com/Ogguz/gitraft/internal/provider/gitlab"
 	"github.com/spf13/cobra"
 )
 
@@ -23,6 +24,7 @@ type migrateFlags struct {
 	Visibility     string
 	Description    string
 	SkipCreate     bool
+	GitLabURL      string
 }
 
 func newMigrateCmd() *cobra.Command {
@@ -42,11 +44,15 @@ func newMigrateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.Visibility, "visibility", "private", "destination visibility: private|public|internal (default private — safer for migrations)")
 	cmd.Flags().StringVar(&f.Description, "description", "", "description for an auto-created destination")
 	cmd.Flags().BoolVar(&f.SkipCreate, "skip-create", false, "do not auto-create the destination if it is missing")
+	cmd.Flags().StringVar(&f.GitLabURL, "gitlab-url", "", "self-hosted GitLab base URL (default: https://gitlab.com)")
 	return cmd
 }
 
 func runMigrate(ctx context.Context, srcRaw, dstRaw string, f migrateFlags, logger *slog.Logger) error {
-	providers := buildProviders(logger)
+	providers, err := buildProviders(f.GitLabURL)
+	if err != nil {
+		return err
+	}
 
 	srcURL, err := provider.Parse(srcRaw)
 	if err != nil {
@@ -65,6 +71,10 @@ func runMigrate(ctx context.Context, srcRaw, dstRaw string, f migrateFlags, logg
 	if err != nil {
 		return fmt.Errorf("destination provider: %w", err)
 	}
+
+	// Warn about missing tokens only for providers we actually resolved to —
+	// avoids noise when e.g. the user is migrating gitlab→gitlab.
+	warnMissingTokens(logger, srcProv, dstProv)
 
 	if dstProv != nil && !f.SkipCreate {
 		vis, err := provider.ParseVisibility(f.Visibility)
@@ -94,16 +104,71 @@ func runMigrate(ctx context.Context, srcRaw, dstRaw string, f migrateFlags, logg
 	})
 }
 
-// buildProviders returns the set of available providers, configured from env.
-// Emits a warning when GITHUB_TOKEN is unset so users don't chase confusing
-// 401/404s later.
-func buildProviders(logger *slog.Logger) []provider.Provider {
-	token := os.Getenv("GITHUB_TOKEN")
-	if token == "" {
-		logger.Warn("GITHUB_TOKEN unset; GitHub API calls will be unauthenticated (public repos only)")
+// buildProviders constructs the set of available providers, configured from
+// env and flags. Does NOT emit token warnings — those are deferred to
+// warnMissingTokens so we only warn for providers the user actually reached.
+func buildProviders(gitlabURL string) ([]provider.Provider, error) {
+	host, err := gitlabHost(gitlabURL)
+	if err != nil {
+		return nil, err
 	}
 	return []provider.Provider{
-		github.New(github.Options{Token: token}),
+		github.New(github.Options{Token: os.Getenv("GITHUB_TOKEN")}),
+		gitlab.New(gitlab.Options{Token: os.Getenv("GITLAB_TOKEN"), Host: host}),
+	}, nil
+}
+
+// gitlabHost extracts a hostname (no port) from either a URL
+// ("https://host:8080/path") or a bare hostname ("host" or "host:port").
+// Returns an error for clearly invalid input. Empty input yields empty output,
+// which lets gitlab.New fall back to its default.
+func gitlabHost(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	candidate := raw
+	if !strings.Contains(raw, "://") {
+		candidate = "https://" + raw
+	}
+	u, err := url.Parse(candidate)
+	if err != nil {
+		return "", fmt.Errorf("invalid --gitlab-url %q: %w", raw, err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", fmt.Errorf("invalid --gitlab-url %q: no host", raw)
+	}
+	return host, nil
+}
+
+// warnMissingTokens emits one warning per provider in `used` whose auth token
+// env var is unset. Duplicates are collapsed so a source+dest on the same
+// provider yields a single warning.
+func warnMissingTokens(logger *slog.Logger, used ...provider.Provider) {
+	seen := map[string]bool{}
+	for _, p := range used {
+		if p == nil {
+			continue
+		}
+		name := p.Name()
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		var envVar, warning string
+		switch name {
+		case "github":
+			envVar = "GITHUB_TOKEN"
+			warning = "GITHUB_TOKEN unset; GitHub API calls will be unauthenticated (public repos only)"
+		case "gitlab":
+			envVar = "GITLAB_TOKEN"
+			warning = "GITLAB_TOKEN unset; GitLab API calls will be unauthenticated (public projects only)"
+		default:
+			continue
+		}
+		if os.Getenv(envVar) == "" {
+			logger.Warn(warning)
+		}
 	}
 }
 
