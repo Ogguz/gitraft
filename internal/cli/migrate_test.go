@@ -223,11 +223,11 @@ func TestAuthURL_WithProviderUsesProvider(t *testing.T) {
 }
 
 func TestBuildProviders_CreatesAllProviders(t *testing.T) {
-	ps, err := buildProviders("", "")
+	ps, err := buildProviders("", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"github", "gitlab", "bitbucket", "bitbucket-server"} {
+	for _, name := range []string{"github", "gitlab", "bitbucket", "bitbucket-server", "gitea"} {
 		if provider.ByName(ps, name) == nil {
 			t.Errorf("expected %q provider in registry", name)
 		}
@@ -235,7 +235,7 @@ func TestBuildProviders_CreatesAllProviders(t *testing.T) {
 }
 
 func TestBuildProviders_GitLabSelfHostedMatches(t *testing.T) {
-	ps, err := buildProviders("https://gitlab.example.com", "")
+	ps, err := buildProviders("https://gitlab.example.com", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestBuildProviders_GitLabSelfHostedMatches(t *testing.T) {
 func TestBuildProviders_GitLabSelfHostedWithPortMatches(t *testing.T) {
 	// Regression: previously gitlabHost returned Host (with port), but Matches
 	// compared Hostname (without port) — so ":8080" URLs silently never matched.
-	ps, err := buildProviders("https://gitlab.example.com:8080", "")
+	ps, err := buildProviders("https://gitlab.example.com:8080", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestBuildProviders_GitLabSelfHostedWithPortMatches(t *testing.T) {
 }
 
 func TestBuildProviders_InvalidGitLabURL(t *testing.T) {
-	_, err := buildProviders("://broken", "")
+	_, err := buildProviders("://broken", "", "")
 	if err == nil {
 		t.Fatal("expected error for malformed URL")
 	}
@@ -282,7 +282,7 @@ func TestBuildProviders_InvalidGitLabURL(t *testing.T) {
 }
 
 func TestBuildProviders_InvalidBitbucketURL(t *testing.T) {
-	_, err := buildProviders("", "://broken")
+	_, err := buildProviders("", "://broken", "")
 	if err == nil {
 		t.Fatal("expected error for malformed URL")
 	}
@@ -292,7 +292,7 @@ func TestBuildProviders_InvalidBitbucketURL(t *testing.T) {
 }
 
 func TestBuildProviders_BitbucketServerUnconfiguredMatchesNothing(t *testing.T) {
-	ps, err := buildProviders("", "")
+	ps, err := buildProviders("", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestBuildProviders_BitbucketServerUnconfiguredMatchesNothing(t *testing.T) 
 
 func TestBuildProviders_BothInvalidURLsAreJoinedErrors(t *testing.T) {
 	// Both flags malformed → caller sees both errors at once, not just the first.
-	_, err := buildProviders("://gl-broken", "://bb-broken")
+	_, err := buildProviders("://gl-broken", "://bb-broken", "://gt-broken")
 	if err == nil {
 		t.Fatal("expected joined error")
 	}
@@ -319,16 +319,66 @@ func TestBuildProviders_BothInvalidURLsAreJoinedErrors(t *testing.T) {
 	if !strings.Contains(msg, "--bitbucket-url") {
 		t.Errorf("expected bitbucket error in joined output; got %v", msg)
 	}
+	if !strings.Contains(msg, "--gitea-url") {
+		t.Errorf("expected gitea error in joined output; got %v", msg)
+	}
 }
 
-func TestBuildProviders_BothFlagsCombined(t *testing.T) {
-	ps, err := buildProviders("https://gl.example.com", "https://bb.example.com")
+func TestBuildProviders_InvalidGiteaURL(t *testing.T) {
+	_, err := buildProviders("", "", "://broken")
+	if err == nil {
+		t.Fatal("expected error for malformed URL")
+	}
+	if !strings.Contains(err.Error(), "invalid --gitea-url") {
+		t.Errorf("expected 'invalid --gitea-url' in error; got %v", err)
+	}
+}
+
+func TestBuildProviders_GiteaConfiguredMatches(t *testing.T) {
+	ps, err := buildProviders("", "", "https://gitea.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gt := provider.ByName(ps, "gitea")
+	if gt == nil {
+		t.Fatal("gitea provider missing")
+	}
+	if !gt.Matches(mustParse(t, "https://gitea.example.com/a/b.git")) {
+		t.Error("configured gitea should match its host")
+	}
+	if gt.Matches(mustParse(t, "https://gitea.com/a/b.git")) {
+		t.Error("configured gitea should not match a different host")
+	}
+}
+
+func TestBuildProviders_GiteaUnconfiguredMatchesNothing(t *testing.T) {
+	// Gitea is dominantly self-hosted — without --gitea-url, the provider
+	// must match nothing (mirrors the Bitbucket Server pattern).
+	ps, err := buildProviders("", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gt := provider.ByName(ps, "gitea")
+	for _, raw := range []string{
+		"https://gitea.com/a/b.git",
+		"https://codeberg.org/a/b.git",
+		"https://gitea.example.com/a/b.git",
+	} {
+		if gt.Matches(mustParse(t, raw)) {
+			t.Errorf("unconfigured gitea must not match %s", raw)
+		}
+	}
+}
+
+func TestBuildProviders_AllSelfHostedFlagsCombined(t *testing.T) {
+	ps, err := buildProviders("https://gl.example.com", "https://bb.example.com", "https://gt.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
 	gl := provider.ByName(ps, "gitlab")
 	bbs := provider.ByName(ps, "bitbucket-server")
-	if gl == nil || bbs == nil {
+	gt := provider.ByName(ps, "gitea")
+	if gl == nil || bbs == nil || gt == nil {
 		t.Fatal("missing providers")
 	}
 	if !gl.Matches(mustParse(t, "https://gl.example.com/a/b.git")) {
@@ -337,10 +387,13 @@ func TestBuildProviders_BothFlagsCombined(t *testing.T) {
 	if !bbs.Matches(mustParse(t, "https://bb.example.com/scm/proj/repo.git")) {
 		t.Error("bitbucket-server should match its configured host")
 	}
+	if !gt.Matches(mustParse(t, "https://gt.example.com/owner/repo.git")) {
+		t.Error("gitea should match its configured host")
+	}
 }
 
 func TestBuildProviders_BitbucketServerConfiguredMatches(t *testing.T) {
-	ps, err := buildProviders("", "https://bitbucket.example.com")
+	ps, err := buildProviders("", "https://bitbucket.example.com", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,6 +565,55 @@ func TestWarnMissingTokens_NilProviderIgnored(t *testing.T) {
 	warnMissingTokens(logger, nil, &mockProvider{name: "github"})
 	if !strings.Contains(buf.String(), "GITHUB_TOKEN") {
 		t.Errorf("github warning expected despite nil entry; got %s", buf.String())
+	}
+}
+
+func TestWarnMissingTokens_GiteaTokenUnsetWarns(t *testing.T) {
+	cases := []struct {
+		name  string
+		token string
+		warn  bool
+	}{
+		{"unset", "", true},
+		{"set", "tok", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GITEA_TOKEN", tc.token)
+			logger, buf := testLogger()
+			warnMissingTokens(logger, &mockProvider{name: "gitea"})
+			warned := strings.Contains(buf.String(), "GITEA_TOKEN unset")
+			if warned != tc.warn {
+				t.Errorf("warned = %v; want %v (buf=%s)", warned, tc.warn, buf.String())
+			}
+		})
+	}
+}
+
+func TestEnsureDestination_WarnsOnInternalCollapse(t *testing.T) {
+	cases := []struct {
+		providerName string
+		wantWarn     bool
+	}{
+		{"github", true},           // GitHub has no native internal — warn
+		{"gitlab", false},          // GitLab supports internal — no warn
+		{"bitbucket", true},        // Cloud — warn
+		{"bitbucket-server", true}, // Server — warn
+		{"gitea", true},            // Gitea — warn
+	}
+	for _, tc := range cases {
+		t.Run(tc.providerName, func(t *testing.T) {
+			mp := &mockProvider{name: tc.providerName, hosts: []string{"example.com"}, exists: false}
+			logger, buf := testLogger()
+			u := mustParse(t, "https://example.com/owner/repo.git")
+			if err := ensureDestination(context.Background(), mp, u, "", provider.VisibilityInternal, logger); err != nil {
+				t.Fatal(err)
+			}
+			warned := strings.Contains(buf.String(), "does not support 'internal' visibility")
+			if warned != tc.wantWarn {
+				t.Errorf("warned = %v; want %v (buf=%s)", warned, tc.wantWarn, buf.String())
+			}
+		})
 	}
 }
 

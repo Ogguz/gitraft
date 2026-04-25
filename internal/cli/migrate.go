@@ -13,6 +13,7 @@ import (
 	"github.com/Ogguz/gitraft/internal/provider"
 	"github.com/Ogguz/gitraft/internal/provider/bitbucket"
 	"github.com/Ogguz/gitraft/internal/provider/bitbucketserver"
+	"github.com/Ogguz/gitraft/internal/provider/gitea"
 	"github.com/Ogguz/gitraft/internal/provider/github"
 	"github.com/Ogguz/gitraft/internal/provider/gitlab"
 	"github.com/spf13/cobra"
@@ -28,6 +29,7 @@ type migrateFlags struct {
 	SkipCreate     bool
 	GitLabURL      string
 	BitbucketURL   string
+	GiteaURL       string
 }
 
 func newMigrateCmd() *cobra.Command {
@@ -49,11 +51,12 @@ func newMigrateCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.SkipCreate, "skip-create", false, "do not auto-create the destination if it is missing")
 	cmd.Flags().StringVar(&f.GitLabURL, "gitlab-url", "", "self-hosted GitLab base URL (default: https://gitlab.com)")
 	cmd.Flags().StringVar(&f.BitbucketURL, "bitbucket-url", "", "self-hosted Bitbucket Server / Data Center URL (no default; required to engage that provider)")
+	cmd.Flags().StringVar(&f.GiteaURL, "gitea-url", "", "self-hosted Gitea base URL (default: https://gitea.com)")
 	return cmd
 }
 
 func runMigrate(ctx context.Context, srcRaw, dstRaw string, f migrateFlags, logger *slog.Logger) error {
-	providers, err := buildProviders(f.GitLabURL, f.BitbucketURL)
+	providers, err := buildProviders(f.GitLabURL, f.BitbucketURL, f.GiteaURL)
 	if err != nil {
 		return err
 	}
@@ -112,13 +115,14 @@ func runMigrate(ctx context.Context, srcRaw, dstRaw string, f migrateFlags, logg
 // env and flags. Does NOT emit token warnings — those are deferred to
 // warnMissingTokens so we only warn for providers the user actually reached.
 //
-// Both --gitlab-url and --bitbucket-url are validated; errors are joined so a
-// user with multiple bad flags fixes everything in one round-trip.
-func buildProviders(gitlabURL, bitbucketServerURL string) ([]provider.Provider, error) {
+// All host-bearing flags are validated and errors are joined so a user with
+// multiple bad flags fixes everything in one round-trip.
+func buildProviders(gitlabURL, bitbucketServerURL, giteaURL string) ([]provider.Provider, error) {
 	gitlabHostname, gErr := gitlabHost(gitlabURL)
 	bbServerHostname, bbErr := bitbucketServerHost(bitbucketServerURL)
-	if gErr != nil || bbErr != nil {
-		return nil, errors.Join(gErr, bbErr)
+	giteaHostname, gtErr := giteaHost(giteaURL)
+	if gErr != nil || bbErr != nil || gtErr != nil {
+		return nil, errors.Join(gErr, bbErr, gtErr)
 	}
 	return []provider.Provider{
 		github.New(github.Options{Token: os.Getenv("GITHUB_TOKEN")}),
@@ -132,6 +136,10 @@ func buildProviders(gitlabURL, bitbucketServerURL string) ([]provider.Provider, 
 			Username: os.Getenv("BITBUCKET_SERVER_USERNAME"),
 			Token:    os.Getenv("BITBUCKET_SERVER_TOKEN"),
 		}),
+		gitea.New(gitea.Options{
+			Host:  giteaHostname,
+			Token: os.Getenv("GITEA_TOKEN"),
+		}),
 	}, nil
 }
 
@@ -142,6 +150,7 @@ var providerAuthVars = map[string][]string{
 	"gitlab":           {"GITLAB_TOKEN"},
 	"bitbucket":        {"BITBUCKET_USERNAME", "BITBUCKET_APP_PASSWORD"},
 	"bitbucket-server": {"BITBUCKET_SERVER_USERNAME", "BITBUCKET_SERVER_TOKEN"},
+	"gitea":            {"GITEA_TOKEN"},
 }
 
 // providerWarnings is the message emitted when any required env var is unset
@@ -151,6 +160,15 @@ var providerWarnings = map[string]string{
 	"gitlab":           "GITLAB_TOKEN unset; GitLab API calls will be unauthenticated (public projects only)",
 	"bitbucket":        "BITBUCKET_USERNAME or BITBUCKET_APP_PASSWORD unset; Bitbucket API calls will be unauthenticated (public repos only)",
 	"bitbucket-server": "BITBUCKET_SERVER_USERNAME or BITBUCKET_SERVER_TOKEN unset; Bitbucket Server API calls will be unauthenticated",
+	"gitea":            "GITEA_TOKEN unset; Gitea API calls will be unauthenticated (public repos only)",
+}
+
+// providersWithInternalVisibility names providers that support a per-repo
+// "internal" tier natively. When a destination provider is NOT in this set
+// and the user asks for VisibilityInternal, ensureDestination warns about
+// the silent collapse to "private".
+var providersWithInternalVisibility = map[string]bool{
+	"gitlab": true,
 }
 
 // parseHostFromURL extracts a hostname (no port) from either a full URL
@@ -185,6 +203,11 @@ func gitlabHost(raw string) (string, error) {
 // the Bitbucket Server provider's Matches will return false for every URL.
 func bitbucketServerHost(raw string) (string, error) {
 	return parseHostFromURL(raw, "--bitbucket-url")
+}
+
+// giteaHost reads --gitea-url; empty means "use the gitea.com default".
+func giteaHost(raw string) (string, error) {
+	return parseHostFromURL(raw, "--gitea-url")
 }
 
 // warnMissingTokens emits one warning per provider in `used` whose required
@@ -237,6 +260,9 @@ func providerNames(ps []provider.Provider) []string {
 
 // ensureDestination checks if the destination repo exists; if not, creates it.
 // A 409/422 "already exists" from CreateRepo is treated as a benign race.
+//
+// Warns when VisibilityInternal would silently collapse to "private" because
+// the destination provider doesn't have a native internal tier.
 func ensureDestination(ctx context.Context, p provider.Provider, u *url.URL, description string, vis provider.Visibility, logger *slog.Logger) error {
 	owner, name, err := p.ParseRepo(u)
 	if err != nil {
@@ -249,6 +275,9 @@ func ensureDestination(ctx context.Context, p provider.Provider, u *url.URL, des
 	if exists {
 		logger.Info("destination exists; skipping create", "provider", p.Name(), "owner", owner, "name", name)
 		return nil
+	}
+	if vis == provider.VisibilityInternal && !providersWithInternalVisibility[p.Name()] {
+		logger.Warn("provider does not support 'internal' visibility; will use 'private' instead", "provider", p.Name())
 	}
 	logger.Info("creating destination", "provider", p.Name(), "owner", owner, "name", name, "visibility", vis.String())
 	err = p.CreateRepo(ctx, provider.CreateOptions{
