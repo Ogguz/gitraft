@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Ogguz/gitraft/internal/config"
 	"github.com/Ogguz/gitraft/internal/mirror"
 	"github.com/Ogguz/gitraft/internal/provider"
 	"github.com/Ogguz/gitraft/internal/provider/bitbucket"
@@ -30,6 +31,7 @@ type migrateFlags struct {
 	GitLabURL      string
 	BitbucketURL   string
 	GiteaURL       string
+	Config         string
 }
 
 func newMigrateCmd() *cobra.Command {
@@ -41,6 +43,9 @@ func newMigrateCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runMigrate(cmd.Context(), args[0], args[1], f, newLogger(verbose))
 		},
+		// Cobra prints usage on RunE errors by default; suppress when our
+		// errors are domain failures rather than CLI-syntax problems.
+		SilenceUsage: true,
 	}
 	cmd.Flags().BoolVar(&f.DryRun, "dry-run", false, "print commands without executing them")
 	cmd.Flags().BoolVar(&f.Cleanup, "cleanup", false, "delete the temporary clone after pushing")
@@ -51,12 +56,18 @@ func newMigrateCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.SkipCreate, "skip-create", false, "do not auto-create the destination if it is missing")
 	cmd.Flags().StringVar(&f.GitLabURL, "gitlab-url", "", "self-hosted GitLab base URL (default: https://gitlab.com)")
 	cmd.Flags().StringVar(&f.BitbucketURL, "bitbucket-url", "", "self-hosted Bitbucket Server / Data Center URL (no default; required to engage that provider)")
-	cmd.Flags().StringVar(&f.GiteaURL, "gitea-url", "", "self-hosted Gitea base URL (default: https://gitea.com)")
+	cmd.Flags().StringVar(&f.GiteaURL, "gitea-url", "", "self-hosted Gitea base URL (no default; required to engage that provider)")
+	cmd.Flags().StringVar(&f.Config, "config", "", "path to YAML config file (default: $XDG_CONFIG_HOME/gitraft/config.yaml)")
 	return cmd
 }
 
 func runMigrate(ctx context.Context, srcRaw, dstRaw string, f migrateFlags, logger *slog.Logger) error {
-	providers, err := buildProviders(f.GitLabURL, f.BitbucketURL, f.GiteaURL)
+	cfg, err := loadConfig(f.Config, logger)
+	if err != nil {
+		return err
+	}
+	settings := resolveSettings(f, cfg)
+	providers, err := buildProviders(settings)
 	if err != nil {
 		return err
 	}
@@ -81,7 +92,7 @@ func runMigrate(ctx context.Context, srcRaw, dstRaw string, f migrateFlags, logg
 
 	// Warn about missing tokens only for providers we actually resolved to —
 	// avoids noise when e.g. the user is migrating gitlab→gitlab.
-	warnMissingTokens(logger, srcProv, dstProv)
+	warnMissingTokens(logger, settings, srcProv, dstProv)
 
 	if dstProv != nil && !f.SkipCreate {
 		vis, err := provider.ParseVisibility(f.Visibility)
@@ -111,50 +122,156 @@ func runMigrate(ctx context.Context, srcRaw, dstRaw string, f migrateFlags, logg
 	})
 }
 
-// buildProviders constructs the set of available providers, configured from
-// env and flags. Does NOT emit token warnings — those are deferred to
+// providerSettings holds per-provider configuration after resolving values
+// from CLI flags, environment variables, and the config file. Resolution
+// priority is flag > env > config (highest to lowest), encoded by the call
+// order to resolve(). Per-provider sub-structs co-locate the auth-completeness
+// rule with the data via Authenticated().
+type providerSettings struct {
+	GitHub          githubSettings
+	GitLab          gitlabSettings
+	Bitbucket       bitbucketSettings
+	BitbucketServer bitbucketServerSettings
+	Gitea           giteaSettings
+}
+
+type githubSettings struct {
+	Token string
+}
+
+func (s githubSettings) Authenticated() bool { return s.Token != "" }
+
+type gitlabSettings struct {
+	URL, Token string
+}
+
+func (s gitlabSettings) Authenticated() bool { return s.Token != "" }
+
+type bitbucketSettings struct {
+	Username, AppPassword string
+}
+
+func (s bitbucketSettings) Authenticated() bool {
+	return s.Username != "" && s.AppPassword != ""
+}
+
+type bitbucketServerSettings struct {
+	URL, Username, Token string
+}
+
+func (s bitbucketServerSettings) Authenticated() bool {
+	return s.Username != "" && s.Token != ""
+}
+
+type giteaSettings struct {
+	URL, Token string
+}
+
+func (s giteaSettings) Authenticated() bool { return s.Token != "" }
+
+// loadConfig reads the config file. With an empty path argument the default
+// location is used and a missing file is treated as no-config (no error).
+// With an explicit path, a missing file is an error so typos surface loudly.
+// Always emits a permissions warning when the resolved file is too readable.
+func loadConfig(explicitPath string, logger *slog.Logger) (*config.Config, error) {
+	if explicitPath != "" {
+		cfg, err := config.Load(explicitPath)
+		if err != nil {
+			return nil, err
+		}
+		config.WarnInsecurePermissions(explicitPath, logger)
+		return cfg, nil
+	}
+	defaultPath := config.DefaultPath()
+	if defaultPath == "" {
+		logger.Debug("no config home detected; skipping config-file lookup")
+		return &config.Config{}, nil
+	}
+	cfg, err := config.LoadOrEmpty(defaultPath)
+	if err != nil {
+		return nil, err
+	}
+	config.WarnInsecurePermissions(defaultPath, logger)
+	return cfg, nil
+}
+
+// resolveSettings merges values from flags, env vars, and the config file.
+// Each call to resolve(...) makes the priority explicit at the call site.
+func resolveSettings(f migrateFlags, cfg *config.Config) providerSettings {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	return providerSettings{
+		GitHub: githubSettings{
+			Token: resolve("", os.Getenv("GITHUB_TOKEN"), cfg.Providers.GitHub.Token),
+		},
+		GitLab: gitlabSettings{
+			URL:   resolve(f.GitLabURL, "", cfg.Providers.GitLab.URL),
+			Token: resolve("", os.Getenv("GITLAB_TOKEN"), cfg.Providers.GitLab.Token),
+		},
+		Bitbucket: bitbucketSettings{
+			Username:    resolve("", os.Getenv("BITBUCKET_USERNAME"), cfg.Providers.Bitbucket.Username),
+			AppPassword: resolve("", os.Getenv("BITBUCKET_APP_PASSWORD"), cfg.Providers.Bitbucket.AppPassword),
+		},
+		BitbucketServer: bitbucketServerSettings{
+			URL:      resolve(f.BitbucketURL, "", cfg.Providers.BitbucketServer.URL),
+			Username: resolve("", os.Getenv("BITBUCKET_SERVER_USERNAME"), cfg.Providers.BitbucketServer.Username),
+			Token:    resolve("", os.Getenv("BITBUCKET_SERVER_TOKEN"), cfg.Providers.BitbucketServer.Token),
+		},
+		Gitea: giteaSettings{
+			URL:   resolve(f.GiteaURL, "", cfg.Providers.Gitea.URL),
+			Token: resolve("", os.Getenv("GITEA_TOKEN"), cfg.Providers.Gitea.Token),
+		},
+	}
+}
+
+// resolve picks the first non-empty value in priority order: flag > env > config.
+// Empty arguments mean "no source for this slot" — handy when a setting has
+// no env var (URLs) or no flag (tokens).
+func resolve(flag, env, cfg string) string {
+	for _, v := range [...]string{flag, env, cfg} {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// buildProviders constructs the set of available providers from the resolved
+// settings. Does NOT emit token warnings — those are deferred to
 // warnMissingTokens so we only warn for providers the user actually reached.
 //
-// All host-bearing flags are validated and errors are joined so a user with
-// multiple bad flags fixes everything in one round-trip.
-func buildProviders(gitlabURL, bitbucketServerURL, giteaURL string) ([]provider.Provider, error) {
-	gitlabHostname, gErr := gitlabHost(gitlabURL)
-	bbServerHostname, bbErr := bitbucketServerHost(bitbucketServerURL)
-	giteaHostname, gtErr := giteaHost(giteaURL)
+// All host-bearing settings are validated and errors are joined so a user
+// with multiple bad URLs fixes everything in one round-trip.
+func buildProviders(s providerSettings) ([]provider.Provider, error) {
+	gitlabHostname, gErr := gitlabHost(s.GitLab.URL)
+	bbServerHostname, bbErr := bitbucketServerHost(s.BitbucketServer.URL)
+	giteaHostname, gtErr := giteaHost(s.Gitea.URL)
 	if gErr != nil || bbErr != nil || gtErr != nil {
 		return nil, errors.Join(gErr, bbErr, gtErr)
 	}
 	return []provider.Provider{
-		github.New(github.Options{Token: os.Getenv("GITHUB_TOKEN")}),
-		gitlab.New(gitlab.Options{Token: os.Getenv("GITLAB_TOKEN"), Host: gitlabHostname}),
+		github.New(github.Options{Token: s.GitHub.Token}),
+		gitlab.New(gitlab.Options{Token: s.GitLab.Token, Host: gitlabHostname}),
 		bitbucket.New(bitbucket.Options{
-			Username:    os.Getenv("BITBUCKET_USERNAME"),
-			AppPassword: os.Getenv("BITBUCKET_APP_PASSWORD"),
+			Username:    s.Bitbucket.Username,
+			AppPassword: s.Bitbucket.AppPassword,
 		}),
 		bitbucketserver.New(bitbucketserver.Options{
 			Host:     bbServerHostname,
-			Username: os.Getenv("BITBUCKET_SERVER_USERNAME"),
-			Token:    os.Getenv("BITBUCKET_SERVER_TOKEN"),
+			Username: s.BitbucketServer.Username,
+			Token:    s.BitbucketServer.Token,
 		}),
 		gitea.New(gitea.Options{
 			Host:  giteaHostname,
-			Token: os.Getenv("GITEA_TOKEN"),
+			Token: s.Gitea.Token,
 		}),
 	}, nil
 }
 
-// providerAuthVars maps provider name to the env vars whose presence enables
-// authenticated API calls. Multiple vars means all are required.
-var providerAuthVars = map[string][]string{
-	"github":           {"GITHUB_TOKEN"},
-	"gitlab":           {"GITLAB_TOKEN"},
-	"bitbucket":        {"BITBUCKET_USERNAME", "BITBUCKET_APP_PASSWORD"},
-	"bitbucket-server": {"BITBUCKET_SERVER_USERNAME", "BITBUCKET_SERVER_TOKEN"},
-	"gitea":            {"GITEA_TOKEN"},
-}
-
-// providerWarnings is the message emitted when any required env var is unset
-// for that provider. Single message per provider keeps the log compact.
+// providerWarnings is the message emitted when any required auth value is
+// unset for that provider (after resolving env and config). Single message
+// per provider keeps the log compact.
 var providerWarnings = map[string]string{
 	"github":           "GITHUB_TOKEN unset; GitHub API calls will be unauthenticated (public repos only)",
 	"gitlab":           "GITLAB_TOKEN unset; GitLab API calls will be unauthenticated (public projects only)",
@@ -210,10 +327,10 @@ func giteaHost(raw string) (string, error) {
 	return parseHostFromURL(raw, "--gitea-url")
 }
 
-// warnMissingTokens emits one warning per provider in `used` whose required
-// auth env vars are unset. Duplicates collapse so a source+dest on the same
-// provider yields a single warning.
-func warnMissingTokens(logger *slog.Logger, used ...provider.Provider) {
+// warnMissingTokens emits one warning per provider in `used` whose effective
+// auth values (after resolving env + config) are unset. Duplicates collapse
+// so a source+dest on the same provider yields a single warning.
+func warnMissingTokens(logger *slog.Logger, s providerSettings, used ...provider.Provider) {
 	seen := map[string]bool{}
 	for _, p := range used {
 		if p == nil {
@@ -224,17 +341,33 @@ func warnMissingTokens(logger *slog.Logger, used ...provider.Provider) {
 			continue
 		}
 		seen[name] = true
-		envVars, ok := providerAuthVars[name]
-		if !ok {
-			continue
-		}
-		for _, env := range envVars {
-			if os.Getenv(env) == "" {
-				logger.Warn(providerWarnings[name])
-				break
+		if !providerAuthSatisfied(name, s) {
+			if msg, ok := providerWarnings[name]; ok {
+				logger.Warn(msg)
 			}
 		}
 	}
+}
+
+// providerAuthSatisfied reports whether the resolved settings have all the
+// values needed for that provider to authenticate API calls. Unknown
+// provider names default to FALSE (i.e., warn) so a future provider added
+// without updating this dispatch fails loudly via the "TOKEN unset" warning
+// rather than silently skipping it.
+func providerAuthSatisfied(name string, s providerSettings) bool {
+	switch name {
+	case "github":
+		return s.GitHub.Authenticated()
+	case "gitlab":
+		return s.GitLab.Authenticated()
+	case "bitbucket":
+		return s.Bitbucket.Authenticated()
+	case "bitbucket-server":
+		return s.BitbucketServer.Authenticated()
+	case "gitea":
+		return s.Gitea.Authenticated()
+	}
+	return false
 }
 
 // pickProvider resolves override-by-name first, falling back to URL auto-detection.

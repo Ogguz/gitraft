@@ -6,9 +6,12 @@ import (
 	"errors"
 	"log/slog"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Ogguz/gitraft/internal/config"
 	"github.com/Ogguz/gitraft/internal/provider"
 )
 
@@ -69,6 +72,22 @@ func testLogger() (*slog.Logger, *bytes.Buffer) {
 	return logger, &buf
 }
 
+// ---- helpers for buildProviders test inputs ----
+
+func settingsWithGitLabURL(u string) providerSettings {
+	return providerSettings{GitLab: gitlabSettings{URL: u}}
+}
+
+func settingsWithBitbucketURL(u string) providerSettings {
+	return providerSettings{BitbucketServer: bitbucketServerSettings{URL: u}}
+}
+
+func settingsWithGiteaURL(u string) providerSettings {
+	return providerSettings{Gitea: giteaSettings{URL: u}}
+}
+
+// ---- pickProvider ----
+
 func TestPickProvider_OverrideMatches(t *testing.T) {
 	gh := &mockProvider{name: "github", hosts: []string{"github.com"}}
 	u := mustParse(t, "https://github.com/a/b.git")
@@ -120,6 +139,8 @@ func TestPickProvider_NoMatchNoError(t *testing.T) {
 		t.Errorf("expected no match; got %q", p.Name())
 	}
 }
+
+// ---- ensureDestination ----
 
 func TestEnsureDestination_SkipsWhenExists(t *testing.T) {
 	gh := &mockProvider{name: "github", hosts: []string{"github.com"}, exists: true}
@@ -188,6 +209,35 @@ func TestEnsureDestination_CreateError(t *testing.T) {
 	}
 }
 
+func TestEnsureDestination_WarnsOnInternalCollapse(t *testing.T) {
+	cases := []struct {
+		providerName string
+		wantWarn     bool
+	}{
+		{"github", true},
+		{"gitlab", false},
+		{"bitbucket", true},
+		{"bitbucket-server", true},
+		{"gitea", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.providerName, func(t *testing.T) {
+			mp := &mockProvider{name: tc.providerName, hosts: []string{"example.com"}, exists: false}
+			logger, buf := testLogger()
+			u := mustParse(t, "https://example.com/owner/repo.git")
+			if err := ensureDestination(context.Background(), mp, u, "", provider.VisibilityInternal, logger); err != nil {
+				t.Fatal(err)
+			}
+			warned := strings.Contains(buf.String(), "does not support 'internal' visibility")
+			if warned != tc.wantWarn {
+				t.Errorf("warned = %v; want %v (buf=%s)", warned, tc.wantWarn, buf.String())
+			}
+		})
+	}
+}
+
+// ---- authURL ----
+
 func TestAuthURL_NilProviderWarnsAndPassesThrough(t *testing.T) {
 	logger, buf := testLogger()
 	u := mustParse(t, "https://bitbucket.org/a/b.git")
@@ -222,8 +272,34 @@ func TestAuthURL_WithProviderUsesProvider(t *testing.T) {
 	}
 }
 
+func TestAuthURL_BitbucketServerHintWhenUnconfigured(t *testing.T) {
+	logger, buf := testLogger()
+	u := mustParse(t, "https://bb.internal.corp/scm/PROJ/repo.git")
+	got, err := authURL(nil, u, "https://bb.internal.corp/scm/PROJ/repo.git", logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://bb.internal.corp/scm/PROJ/repo.git" {
+		t.Errorf("expected pass-through; got %q", got)
+	}
+	if !strings.Contains(buf.String(), "--bitbucket-url") {
+		t.Errorf("expected --bitbucket-url hint for BB-Server-shaped URL; got %s", buf.String())
+	}
+}
+
+func TestAuthURL_NoHintForUnrelatedURL(t *testing.T) {
+	logger, buf := testLogger()
+	u := mustParse(t, "https://random.example.com/owner/repo.git")
+	_, _ = authURL(nil, u, u.String(), logger)
+	if strings.Contains(buf.String(), "--bitbucket-url") {
+		t.Errorf("BB-Server hint must not fire for unrelated URLs; got %s", buf.String())
+	}
+}
+
+// ---- buildProviders ----
+
 func TestBuildProviders_CreatesAllProviders(t *testing.T) {
-	ps, err := buildProviders("", "", "")
+	ps, err := buildProviders(providerSettings{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,44 +311,35 @@ func TestBuildProviders_CreatesAllProviders(t *testing.T) {
 }
 
 func TestBuildProviders_GitLabSelfHostedMatches(t *testing.T) {
-	ps, err := buildProviders("https://gitlab.example.com", "", "")
+	ps, err := buildProviders(settingsWithGitLabURL("https://gitlab.example.com"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	gl := provider.ByName(ps, "gitlab")
-	if gl == nil {
-		t.Fatal("gitlab provider missing")
-	}
-	u := mustParse(t, "https://gitlab.example.com/a/b.git")
-	if !gl.Matches(u) {
+	if !gl.Matches(mustParse(t, "https://gitlab.example.com/a/b.git")) {
 		t.Error("self-hosted gitlab should match configured host")
 	}
-	uDefault := mustParse(t, "https://gitlab.com/a/b.git")
-	if gl.Matches(uDefault) {
+	if gl.Matches(mustParse(t, "https://gitlab.com/a/b.git")) {
 		t.Error("self-hosted gitlab should not match gitlab.com")
 	}
 }
 
 func TestBuildProviders_GitLabSelfHostedWithPortMatches(t *testing.T) {
-	// Regression: previously gitlabHost returned Host (with port), but Matches
-	// compared Hostname (without port) — so ":8080" URLs silently never matched.
-	ps, err := buildProviders("https://gitlab.example.com:8080", "", "")
+	ps, err := buildProviders(settingsWithGitLabURL("https://gitlab.example.com:8080"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	gl := provider.ByName(ps, "gitlab")
-	u := mustParse(t, "https://gitlab.example.com:8080/a/b.git")
-	if !gl.Matches(u) {
+	if !gl.Matches(mustParse(t, "https://gitlab.example.com:8080/a/b.git")) {
 		t.Error("self-hosted gitlab on :8080 should match")
 	}
-	uNoPort := mustParse(t, "https://gitlab.example.com/a/b.git")
-	if !gl.Matches(uNoPort) {
+	if !gl.Matches(mustParse(t, "https://gitlab.example.com/a/b.git")) {
 		t.Error("self-hosted gitlab should match same host without port")
 	}
 }
 
 func TestBuildProviders_InvalidGitLabURL(t *testing.T) {
-	_, err := buildProviders("://broken", "", "")
+	_, err := buildProviders(settingsWithGitLabURL("://broken"))
 	if err == nil {
 		t.Fatal("expected error for malformed URL")
 	}
@@ -282,7 +349,7 @@ func TestBuildProviders_InvalidGitLabURL(t *testing.T) {
 }
 
 func TestBuildProviders_InvalidBitbucketURL(t *testing.T) {
-	_, err := buildProviders("", "://broken", "")
+	_, err := buildProviders(settingsWithBitbucketURL("://broken"))
 	if err == nil {
 		t.Fatal("expected error for malformed URL")
 	}
@@ -291,41 +358,8 @@ func TestBuildProviders_InvalidBitbucketURL(t *testing.T) {
 	}
 }
 
-func TestBuildProviders_BitbucketServerUnconfiguredMatchesNothing(t *testing.T) {
-	ps, err := buildProviders("", "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bbs := provider.ByName(ps, "bitbucket-server")
-	if bbs == nil {
-		t.Fatal("bitbucket-server provider missing")
-	}
-	u := mustParse(t, "https://bitbucket.example.com/scm/proj/repo.git")
-	if bbs.Matches(u) {
-		t.Error("unconfigured bitbucket-server should not match any URL")
-	}
-}
-
-func TestBuildProviders_BothInvalidURLsAreJoinedErrors(t *testing.T) {
-	// Both flags malformed → caller sees both errors at once, not just the first.
-	_, err := buildProviders("://gl-broken", "://bb-broken", "://gt-broken")
-	if err == nil {
-		t.Fatal("expected joined error")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "--gitlab-url") {
-		t.Errorf("expected gitlab error in joined output; got %v", msg)
-	}
-	if !strings.Contains(msg, "--bitbucket-url") {
-		t.Errorf("expected bitbucket error in joined output; got %v", msg)
-	}
-	if !strings.Contains(msg, "--gitea-url") {
-		t.Errorf("expected gitea error in joined output; got %v", msg)
-	}
-}
-
 func TestBuildProviders_InvalidGiteaURL(t *testing.T) {
-	_, err := buildProviders("", "", "://broken")
+	_, err := buildProviders(settingsWithGiteaURL("://broken"))
 	if err == nil {
 		t.Fatal("expected error for malformed URL")
 	}
@@ -334,15 +368,44 @@ func TestBuildProviders_InvalidGiteaURL(t *testing.T) {
 	}
 }
 
+func TestBuildProviders_AllInvalidURLsAreJoinedErrors(t *testing.T) {
+	_, err := buildProviders(providerSettings{
+		GitLab:          gitlabSettings{URL: "://gl-broken"},
+		BitbucketServer: bitbucketServerSettings{URL: "://bb-broken"},
+		Gitea:           giteaSettings{URL: "://gt-broken"},
+	})
+	if err == nil {
+		t.Fatal("expected joined error")
+	}
+	for _, want := range []string{"--gitlab-url", "--bitbucket-url", "--gitea-url"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("expected %q in joined output; got %v", want, err.Error())
+		}
+	}
+}
+
+func TestBuildProviders_BitbucketServerUnconfiguredMatchesNothing(t *testing.T) {
+	ps, _ := buildProviders(providerSettings{})
+	bbs := provider.ByName(ps, "bitbucket-server")
+	if bbs.Matches(mustParse(t, "https://bitbucket.example.com/scm/proj/repo.git")) {
+		t.Error("unconfigured bitbucket-server should not match any URL")
+	}
+}
+
+func TestBuildProviders_BitbucketServerConfiguredMatches(t *testing.T) {
+	ps, _ := buildProviders(settingsWithBitbucketURL("https://bitbucket.example.com"))
+	bbs := provider.ByName(ps, "bitbucket-server")
+	if !bbs.Matches(mustParse(t, "https://bitbucket.example.com/scm/proj/repo.git")) {
+		t.Error("configured bitbucket-server should match its host")
+	}
+	if bbs.Matches(mustParse(t, "https://bitbucket.org/team/repo.git")) {
+		t.Error("bitbucket-server must not match bitbucket.org")
+	}
+}
+
 func TestBuildProviders_GiteaConfiguredMatches(t *testing.T) {
-	ps, err := buildProviders("", "", "https://gitea.example.com")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ps, _ := buildProviders(settingsWithGiteaURL("https://gitea.example.com"))
 	gt := provider.ByName(ps, "gitea")
-	if gt == nil {
-		t.Fatal("gitea provider missing")
-	}
 	if !gt.Matches(mustParse(t, "https://gitea.example.com/a/b.git")) {
 		t.Error("configured gitea should match its host")
 	}
@@ -352,12 +415,7 @@ func TestBuildProviders_GiteaConfiguredMatches(t *testing.T) {
 }
 
 func TestBuildProviders_GiteaUnconfiguredMatchesNothing(t *testing.T) {
-	// Gitea is dominantly self-hosted — without --gitea-url, the provider
-	// must match nothing (mirrors the Bitbucket Server pattern).
-	ps, err := buildProviders("", "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ps, _ := buildProviders(providerSettings{})
 	gt := provider.ByName(ps, "gitea")
 	for _, raw := range []string{
 		"https://gitea.com/a/b.git",
@@ -371,42 +429,26 @@ func TestBuildProviders_GiteaUnconfiguredMatchesNothing(t *testing.T) {
 }
 
 func TestBuildProviders_AllSelfHostedFlagsCombined(t *testing.T) {
-	ps, err := buildProviders("https://gl.example.com", "https://bb.example.com", "https://gt.example.com")
+	ps, err := buildProviders(providerSettings{
+		GitLab:          gitlabSettings{URL: "https://gl.example.com"},
+		BitbucketServer: bitbucketServerSettings{URL: "https://bb.example.com"},
+		Gitea:           giteaSettings{URL: "https://gt.example.com"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	gl := provider.ByName(ps, "gitlab")
-	bbs := provider.ByName(ps, "bitbucket-server")
-	gt := provider.ByName(ps, "gitea")
-	if gl == nil || bbs == nil || gt == nil {
-		t.Fatal("missing providers")
-	}
-	if !gl.Matches(mustParse(t, "https://gl.example.com/a/b.git")) {
+	if !provider.ByName(ps, "gitlab").Matches(mustParse(t, "https://gl.example.com/a/b.git")) {
 		t.Error("gitlab should match its configured host")
 	}
-	if !bbs.Matches(mustParse(t, "https://bb.example.com/scm/proj/repo.git")) {
+	if !provider.ByName(ps, "bitbucket-server").Matches(mustParse(t, "https://bb.example.com/scm/proj/repo.git")) {
 		t.Error("bitbucket-server should match its configured host")
 	}
-	if !gt.Matches(mustParse(t, "https://gt.example.com/owner/repo.git")) {
+	if !provider.ByName(ps, "gitea").Matches(mustParse(t, "https://gt.example.com/owner/repo.git")) {
 		t.Error("gitea should match its configured host")
 	}
 }
 
-func TestBuildProviders_BitbucketServerConfiguredMatches(t *testing.T) {
-	ps, err := buildProviders("", "https://bitbucket.example.com", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bbs := provider.ByName(ps, "bitbucket-server")
-	u := mustParse(t, "https://bitbucket.example.com/scm/proj/repo.git")
-	if !bbs.Matches(u) {
-		t.Error("configured bitbucket-server should match its host")
-	}
-	uOther := mustParse(t, "https://bitbucket.org/team/repo.git")
-	if bbs.Matches(uOther) {
-		t.Error("bitbucket-server must not match bitbucket.org")
-	}
-}
+// ---- parseHostFromURL / gitlabHost ----
 
 func TestParseHostFromURL(t *testing.T) {
 	tests := []struct {
@@ -445,30 +487,6 @@ func TestParseHostFromURL(t *testing.T) {
 	}
 }
 
-func TestAuthURL_BitbucketServerHintWhenUnconfigured(t *testing.T) {
-	logger, buf := testLogger()
-	u := mustParse(t, "https://bb.internal.corp/scm/PROJ/repo.git")
-	got, err := authURL(nil, u, "https://bb.internal.corp/scm/PROJ/repo.git", logger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "https://bb.internal.corp/scm/PROJ/repo.git" {
-		t.Errorf("expected pass-through; got %q", got)
-	}
-	if !strings.Contains(buf.String(), "--bitbucket-url") {
-		t.Errorf("expected --bitbucket-url hint for BB-Server-shaped URL; got %s", buf.String())
-	}
-}
-
-func TestAuthURL_NoHintForUnrelatedURL(t *testing.T) {
-	logger, buf := testLogger()
-	u := mustParse(t, "https://random.example.com/owner/repo.git")
-	_, _ = authURL(nil, u, u.String(), logger)
-	if strings.Contains(buf.String(), "--bitbucket-url") {
-		t.Errorf("BB-Server hint must not fire for unrelated URLs; got %s", buf.String())
-	}
-}
-
 func TestGitLabHost(t *testing.T) {
 	tests := []struct {
 		in      string
@@ -477,11 +495,11 @@ func TestGitLabHost(t *testing.T) {
 	}{
 		{"", "", false},
 		{"https://gitlab.example.com", "gitlab.example.com", false},
-		{"https://gitlab.example.com:8080/path", "gitlab.example.com", false}, // port stripped
+		{"https://gitlab.example.com:8080/path", "gitlab.example.com", false},
 		{"gitlab.example.com", "gitlab.example.com", false},
-		{"gitlab.example.com:8080", "gitlab.example.com", false}, // port stripped
+		{"gitlab.example.com:8080", "gitlab.example.com", false},
 		{"://broken", "", true},
-		{"https://", "", true}, // no host
+		{"https://", "", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.in, func(t *testing.T) {
@@ -502,11 +520,11 @@ func TestGitLabHost(t *testing.T) {
 	}
 }
 
+// ---- warnMissingTokens ----
+
 func TestWarnMissingTokens_BothUnset(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "")
-	t.Setenv("GITLAB_TOKEN", "")
 	logger, buf := testLogger()
-	warnMissingTokens(logger,
+	warnMissingTokens(logger, providerSettings{},
 		&mockProvider{name: "github"},
 		&mockProvider{name: "gitlab"},
 	)
@@ -519,11 +537,8 @@ func TestWarnMissingTokens_BothUnset(t *testing.T) {
 }
 
 func TestWarnMissingTokens_OnlyWarnsForUsedProviders(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "")
-	t.Setenv("GITLAB_TOKEN", "")
 	logger, buf := testLogger()
-	// Only gitlab is used — GITHUB_TOKEN warning must NOT fire.
-	warnMissingTokens(logger, &mockProvider{name: "gitlab"})
+	warnMissingTokens(logger, providerSettings{}, &mockProvider{name: "gitlab"})
 	if strings.Contains(buf.String(), "GITHUB_TOKEN") {
 		t.Errorf("GITHUB_TOKEN warning must not fire when github isn't used; got %s", buf.String())
 	}
@@ -533,10 +548,8 @@ func TestWarnMissingTokens_OnlyWarnsForUsedProviders(t *testing.T) {
 }
 
 func TestWarnMissingTokens_Dedup(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "")
 	logger, buf := testLogger()
-	// Same provider passed twice — warn only once.
-	warnMissingTokens(logger,
+	warnMissingTokens(logger, providerSettings{},
 		&mockProvider{name: "github"},
 		&mockProvider{name: "github"},
 	)
@@ -547,10 +560,12 @@ func TestWarnMissingTokens_Dedup(t *testing.T) {
 }
 
 func TestWarnMissingTokens_TokenSetNoWarn(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "x")
-	t.Setenv("GITLAB_TOKEN", "y")
+	s := providerSettings{
+		GitHub: githubSettings{Token: "x"},
+		GitLab: gitlabSettings{Token: "y"},
+	}
 	logger, buf := testLogger()
-	warnMissingTokens(logger,
+	warnMissingTokens(logger, s,
 		&mockProvider{name: "github"},
 		&mockProvider{name: "gitlab"},
 	)
@@ -560,9 +575,8 @@ func TestWarnMissingTokens_TokenSetNoWarn(t *testing.T) {
 }
 
 func TestWarnMissingTokens_NilProviderIgnored(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "")
 	logger, buf := testLogger()
-	warnMissingTokens(logger, nil, &mockProvider{name: "github"})
+	warnMissingTokens(logger, providerSettings{}, nil, &mockProvider{name: "github"})
 	if !strings.Contains(buf.String(), "GITHUB_TOKEN") {
 		t.Errorf("github warning expected despite nil entry; got %s", buf.String())
 	}
@@ -579,9 +593,9 @@ func TestWarnMissingTokens_GiteaTokenUnsetWarns(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("GITEA_TOKEN", tc.token)
 			logger, buf := testLogger()
-			warnMissingTokens(logger, &mockProvider{name: "gitea"})
+			s := providerSettings{Gitea: giteaSettings{Token: tc.token}}
+			warnMissingTokens(logger, s, &mockProvider{name: "gitea"})
 			warned := strings.Contains(buf.String(), "GITEA_TOKEN unset")
 			if warned != tc.warn {
 				t.Errorf("warned = %v; want %v (buf=%s)", warned, tc.warn, buf.String())
@@ -590,34 +604,7 @@ func TestWarnMissingTokens_GiteaTokenUnsetWarns(t *testing.T) {
 	}
 }
 
-func TestEnsureDestination_WarnsOnInternalCollapse(t *testing.T) {
-	cases := []struct {
-		providerName string
-		wantWarn     bool
-	}{
-		{"github", true},           // GitHub has no native internal — warn
-		{"gitlab", false},          // GitLab supports internal — no warn
-		{"bitbucket", true},        // Cloud — warn
-		{"bitbucket-server", true}, // Server — warn
-		{"gitea", true},            // Gitea — warn
-	}
-	for _, tc := range cases {
-		t.Run(tc.providerName, func(t *testing.T) {
-			mp := &mockProvider{name: tc.providerName, hosts: []string{"example.com"}, exists: false}
-			logger, buf := testLogger()
-			u := mustParse(t, "https://example.com/owner/repo.git")
-			if err := ensureDestination(context.Background(), mp, u, "", provider.VisibilityInternal, logger); err != nil {
-				t.Fatal(err)
-			}
-			warned := strings.Contains(buf.String(), "does not support 'internal' visibility")
-			if warned != tc.wantWarn {
-				t.Errorf("warned = %v; want %v (buf=%s)", warned, tc.wantWarn, buf.String())
-			}
-		})
-	}
-}
-
-func TestWarnMissingTokens_BitbucketServerEitherEnvUnsetWarns(t *testing.T) {
+func TestWarnMissingTokens_BitbucketServerEitherUnsetWarns(t *testing.T) {
 	cases := []struct {
 		name     string
 		username string
@@ -631,10 +618,12 @@ func TestWarnMissingTokens_BitbucketServerEitherEnvUnsetWarns(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("BITBUCKET_SERVER_USERNAME", tc.username)
-			t.Setenv("BITBUCKET_SERVER_TOKEN", tc.token)
+			s := providerSettings{BitbucketServer: bitbucketServerSettings{
+				Username: tc.username,
+				Token:    tc.token,
+			}}
 			logger, buf := testLogger()
-			warnMissingTokens(logger, &mockProvider{name: "bitbucket-server"})
+			warnMissingTokens(logger, s, &mockProvider{name: "bitbucket-server"})
 			warned := strings.Contains(buf.String(), "BITBUCKET_SERVER_USERNAME or BITBUCKET_SERVER_TOKEN unset")
 			if warned != tc.warn {
 				t.Errorf("warned = %v; want %v (buf=%s)", warned, tc.warn, buf.String())
@@ -643,7 +632,7 @@ func TestWarnMissingTokens_BitbucketServerEitherEnvUnsetWarns(t *testing.T) {
 	}
 }
 
-func TestWarnMissingTokens_BitbucketEitherEnvUnsetWarns(t *testing.T) {
+func TestWarnMissingTokens_BitbucketEitherUnsetWarns(t *testing.T) {
 	cases := []struct {
 		name     string
 		username string
@@ -657,13 +646,275 @@ func TestWarnMissingTokens_BitbucketEitherEnvUnsetWarns(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("BITBUCKET_USERNAME", tc.username)
-			t.Setenv("BITBUCKET_APP_PASSWORD", tc.password)
+			s := providerSettings{Bitbucket: bitbucketSettings{
+				Username:    tc.username,
+				AppPassword: tc.password,
+			}}
 			logger, buf := testLogger()
-			warnMissingTokens(logger, &mockProvider{name: "bitbucket"})
+			warnMissingTokens(logger, s, &mockProvider{name: "bitbucket"})
 			warned := strings.Contains(buf.String(), "BITBUCKET_USERNAME or BITBUCKET_APP_PASSWORD unset")
 			if warned != tc.warn {
 				t.Errorf("warned = %v; want %v (buf=%s)", warned, tc.warn, buf.String())
+			}
+		})
+	}
+}
+
+// TestProviderAuthSatisfied_AllProviderWarningsHaveBranches asserts that
+// every entry in providerWarnings has a matching providerAuthSatisfied case
+// and that an empty settings struct yields false (so the warning fires).
+// Catches regressions where a future provider is added to the warnings map
+// but the auth-satisfied switch isn't updated (or vice versa).
+func TestProviderAuthSatisfied_AllProviderWarningsHaveBranches(t *testing.T) {
+	for name := range providerWarnings {
+		t.Run(name, func(t *testing.T) {
+			if providerAuthSatisfied(name, providerSettings{}) {
+				t.Errorf("providerAuthSatisfied(%q, empty) = true; expected false (no auth set)", name)
+			}
+		})
+	}
+}
+
+// ---- resolveSettings ----
+
+func TestResolveSettings_EnvWinsOverConfig(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "from-env")
+	cfg := &config.Config{Providers: config.Providers{GitHub: config.GitHubProvider{Token: "from-config"}}}
+	s := resolveSettings(migrateFlags{}, cfg)
+	if s.GitHub.Token != "from-env" {
+		t.Errorf("env should win; got %q", s.GitHub.Token)
+	}
+}
+
+func TestResolveSettings_FlagWinsOverConfig(t *testing.T) {
+	cfg := &config.Config{Providers: config.Providers{GitLab: config.GitLabProvider{URL: "https://from-config"}}}
+	s := resolveSettings(migrateFlags{GitLabURL: "https://from-flag"}, cfg)
+	if s.GitLab.URL != "https://from-flag" {
+		t.Errorf("flag should win; got %q", s.GitLab.URL)
+	}
+}
+
+func TestResolveSettings_FlagWinsOverEnvAndConfig(t *testing.T) {
+	// URLs don't currently have env-var sources, but lock in the contract that
+	// a future env-var would still lose to a flag.
+	t.Setenv("GITLAB_URL", "https://from-env") // ignored today, but defensive
+	cfg := &config.Config{Providers: config.Providers{GitLab: config.GitLabProvider{URL: "https://from-config"}}}
+	s := resolveSettings(migrateFlags{GitLabURL: "https://from-flag"}, cfg)
+	if s.GitLab.URL != "https://from-flag" {
+		t.Errorf("flag should win over env+config; got %q", s.GitLab.URL)
+	}
+}
+
+func TestResolveSettings_ConfigUsedWhenOthersUnset(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	cfg := &config.Config{Providers: config.Providers{GitHub: config.GitHubProvider{Token: "from-config"}}}
+	s := resolveSettings(migrateFlags{}, cfg)
+	if s.GitHub.Token != "from-config" {
+		t.Errorf("config should win when env empty; got %q", s.GitHub.Token)
+	}
+}
+
+func TestResolveSettings_AllEmpty(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GITLAB_TOKEN", "")
+	t.Setenv("BITBUCKET_USERNAME", "")
+	t.Setenv("BITBUCKET_APP_PASSWORD", "")
+	t.Setenv("BITBUCKET_SERVER_USERNAME", "")
+	t.Setenv("BITBUCKET_SERVER_TOKEN", "")
+	t.Setenv("GITEA_TOKEN", "")
+	s := resolveSettings(migrateFlags{}, &config.Config{})
+	if s != (providerSettings{}) {
+		t.Errorf("expected zero-value settings; got %+v", s)
+	}
+}
+
+func TestResolveSettings_NilConfigSafe(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "x")
+	s := resolveSettings(migrateFlags{}, nil)
+	if s.GitHub.Token != "x" {
+		t.Errorf("expected env-only resolution; got %q", s.GitHub.Token)
+	}
+}
+
+func TestResolveSettings_MixedSources(t *testing.T) {
+	// One field per source: GitHub from config, GitLab URL from flag,
+	// Bitbucket username from env. All three must land correctly.
+	t.Setenv("BITBUCKET_USERNAME", "alice-from-env")
+	cfg := &config.Config{Providers: config.Providers{
+		GitHub: config.GitHubProvider{Token: "ghp-from-config"},
+	}}
+	s := resolveSettings(migrateFlags{GitLabURL: "https://gl-from-flag"}, cfg)
+	if s.GitHub.Token != "ghp-from-config" {
+		t.Errorf("github from config; got %q", s.GitHub.Token)
+	}
+	if s.GitLab.URL != "https://gl-from-flag" {
+		t.Errorf("gitlab url from flag; got %q", s.GitLab.URL)
+	}
+	if s.Bitbucket.Username != "alice-from-env" {
+		t.Errorf("bitbucket username from env; got %q", s.Bitbucket.Username)
+	}
+}
+
+// ---- loadConfig ----
+
+func TestLoadConfig_DefaultPathMissingIsOK(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	logger, _ := testLogger()
+	cfg, err := loadConfig("", logger)
+	if err != nil {
+		t.Fatalf("expected no error for missing default config; got %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+}
+
+func TestLoadConfig_ExplicitPathMissingErrors(t *testing.T) {
+	logger, _ := testLogger()
+	_, err := loadConfig(filepath.Join(t.TempDir(), "nope.yaml"), logger)
+	if err == nil {
+		t.Fatal("expected error for explicit missing path")
+	}
+}
+
+func TestLoadConfig_ExplicitPathReadsFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	yaml := "providers:\n  github:\n    token: from-file\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	logger, _ := testLogger()
+	cfg, err := loadConfig(path, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Providers.GitHub.Token != "from-file" {
+		t.Errorf("expected token from file; got %q", cfg.Providers.GitHub.Token)
+	}
+}
+
+func TestLoadConfig_NoHomeDetectedDebugLogs(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "") // Windows
+	logger, buf := testLogger()
+	cfg, err := loadConfig("", logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+	// The debug log only appears when no home is detected. UserHomeDir may
+	// still find a path on some systems; only assert when truly empty.
+	if config.DefaultPath() == "" && !strings.Contains(buf.String(), "no config home detected") {
+		t.Errorf("expected debug log when no config home detected; got %s", buf.String())
+	}
+}
+
+// ---- end-to-end resolution + provider construction ----
+
+func TestResolveSettings_ConfigFileEndToEnd(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GITLAB_TOKEN", "")
+	t.Setenv("BITBUCKET_USERNAME", "")
+	t.Setenv("BITBUCKET_APP_PASSWORD", "")
+	t.Setenv("BITBUCKET_SERVER_USERNAME", "")
+	t.Setenv("BITBUCKET_SERVER_TOKEN", "")
+	t.Setenv("GITEA_TOKEN", "")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	yaml := `providers:
+  github:
+    token: ghp_x
+  gitlab:
+    url: https://gl.x.com
+    token: gl_x
+  bitbucket:
+    username: alice
+    app_password: bb_x
+  bitbucket-server:
+    url: https://bb.x.com
+    username: alice
+    token: bbs_x
+  gitea:
+    url: https://gt.x.com
+    token: gt_x
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	logger, _ := testLogger()
+	cfg, err := loadConfig(path, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := resolveSettings(migrateFlags{}, cfg)
+
+	if s.GitHub.Token != "ghp_x" {
+		t.Errorf("github token = %q", s.GitHub.Token)
+	}
+	if s.GitLab.URL != "https://gl.x.com" || s.GitLab.Token != "gl_x" {
+		t.Errorf("gitlab = %+v", s.GitLab)
+	}
+	if s.Bitbucket.Username != "alice" || s.Bitbucket.AppPassword != "bb_x" {
+		t.Errorf("bitbucket = %+v", s.Bitbucket)
+	}
+	if s.BitbucketServer.URL != "https://bb.x.com" || s.BitbucketServer.Token != "bbs_x" {
+		t.Errorf("bitbucket-server = %+v", s.BitbucketServer)
+	}
+	if s.Gitea.URL != "https://gt.x.com" || s.Gitea.Token != "gt_x" {
+		t.Errorf("gitea = %+v", s.Gitea)
+	}
+}
+
+// TestBuildProviders_PassesSettingsToProviders verifies the chain from
+// providerSettings through buildProviders into the provider's behavior.
+// We can't introspect provider internals, but we can verify that AuthURL
+// reflects the token we set, which exercises the full settings → provider
+// → operation path.
+func TestBuildProviders_PassesSettingsToProviders(t *testing.T) {
+	ps, err := buildProviders(providerSettings{
+		GitHub: githubSettings{Token: "passed-through"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gh := provider.ByName(ps, "github")
+	u := mustParse(t, "https://github.com/owner/repo.git")
+	authed, err := gh.AuthURL(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(authed, "passed-through") {
+		t.Errorf("token should have made it into the auth URL; got %q", authed)
+	}
+}
+
+// ---- resolve helper ----
+
+func TestResolve_PriorityOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		flag string
+		env  string
+		cfg  string
+		want string
+	}{
+		{"all empty", "", "", "", ""},
+		{"flag wins", "F", "E", "C", "F"},
+		{"env wins when no flag", "", "E", "C", "E"},
+		{"config wins when others empty", "", "", "C", "C"},
+		{"flag wins even when env empty", "F", "", "C", "F"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolve(tc.flag, tc.env, tc.cfg); got != tc.want {
+				t.Errorf("resolve(%q,%q,%q) = %q; want %q", tc.flag, tc.env, tc.cfg, got, tc.want)
 			}
 		})
 	}
