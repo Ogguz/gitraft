@@ -535,14 +535,40 @@ func looksLikeBitbucketServerURL(u *url.URL) bool {
 	return false
 }
 
+// newLogger picks the log destination based on the package-global
+// jsonOutput. Under --json the structured stream goes to stdout (the
+// pipe-friendly default for scripts); otherwise it goes to stderr (the
+// human-readable default that doesn't pollute any captured stdout).
+//
+// Note that this routes only the slog logger. The wizard's "Launching
+// interactive wizard..." preamble is printed directly to stdout from
+// resolveSourceDestImpl regardless of mode, and child-process stdio (git
+// invoked by mirror.Run) is inherited from the parent — neither is
+// affected by this routing. Under --json, isInteractive returns false so
+// the wizard preamble path is unreachable, leaving stdout cleanly NDJSON.
+//
+// If the chosen sink becomes unwritable mid-run (e.g., `gitraft --json |
+// head -n 1` after the consumer exits), slog discards the failed records
+// silently — the JSONHandler does not surface write errors. The final
+// exit error gets a separate stderr fallback in cmd/gitraft/main.go so
+// the user still hears *something* on a broken-pipe scenario.
 func newLogger(v int) *slog.Logger {
+	if jsonOutput {
+		return newLoggerTo(os.Stdout, v)
+	}
 	return newLoggerTo(os.Stderr, v)
 }
 
-// newLoggerTo is the testable seam: builds the same handler chain as
-// newLogger but writes to an arbitrary writer. The redact wrap is the whole
-// point of the chain — applied here so a CLI test can assert it actually
-// fires (not just that the redact package works in isolation).
+// newLoggerTo is the testable seam for [newLogger] — accepts an arbitrary
+// io.Writer and reads the same package-global jsonOutput to pick the inner
+// handler (slog.NewJSONHandler under --json, slog.NewTextHandler
+// otherwise). The redact wrap sits OUTSIDE the json/text branch so URL
+// userinfo and sensitive attribute values are scrubbed regardless of
+// format.
+//
+// Tests must call resetJSONMode (see json_test.go) before invoking this —
+// the function reads the global at call time, so leaving stale state from
+// a previous test will pick the wrong handler.
 //
 // Verbosity ladder (Phase 4d raised the default rung):
 //
@@ -557,5 +583,12 @@ func newLoggerTo(w io.Writer, v int) *slog.Logger {
 	if v >= 1 {
 		level = slog.LevelDebug
 	}
-	return slog.New(redact.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})))
+	opts := &slog.HandlerOptions{Level: level}
+	var inner slog.Handler
+	if jsonOutput {
+		inner = slog.NewJSONHandler(w, opts)
+	} else {
+		inner = slog.NewTextHandler(w, opts)
+	}
+	return slog.New(redact.New(inner))
 }

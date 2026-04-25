@@ -27,10 +27,24 @@ func main() {
 	root.SilenceErrors = true // we own the error printing below
 
 	if err := root.ExecuteContext(ctx); err != nil {
-		// Apply URL-userinfo redaction to the error message so embedded
-		// tokens (e.g., from wrapped "clone https://x:tok@host: ..." errors)
-		// don't leak to stderr.
-		fmt.Fprintln(os.Stderr, "gitraft:", redact.String(err.Error()))
+		// In --json mode, emit a single NDJSON event on stdout so scripts
+		// can `jq` the failure out of the same stream as the rest of the
+		// run's events. The schema lives in [cli.ExitErrorEvent] so it's
+		// grep-able and renames are loud (typed struct with JSON tags).
+		//
+		// If the encoder itself fails — most commonly a closed-pipe write
+		// when `gitraft --json | head -n 1` exited early — fall back to
+		// stderr so the user still gets *some* signal before exit. The
+		// redaction wrap is applied a second time on the fallback path
+		// because [cli.WriteExitError] only redacted the bytes that
+		// failed to land; the fallback works from the original error.
+		if cli.JSONMode() {
+			if encErr := cli.WriteExitError(os.Stdout, err); encErr != nil {
+				_, _ = fmt.Fprintln(os.Stderr, "gitraft:", redact.String(err.Error()))
+			}
+		} else {
+			_, _ = fmt.Fprintln(os.Stderr, "gitraft:", redact.String(err.Error()))
+		}
 		os.Exit(1)
 	}
 }

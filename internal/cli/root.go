@@ -8,6 +8,22 @@ import "github.com/spf13/cobra"
 // the BindVar/CountVar bindings in [NewRoot]) — no other package code
 // should mutate them, since they affect cross-command behavior and can't
 // safely be reset between in-process command invocations.
+//
+// No locking: the values are written exactly once per process invocation,
+// during cobra.Execute, on the main goroutine before any worker spawns.
+// All reads happen later, so the absence of synchronization is safe under
+// the current single-shot CLI lifecycle. If gitraft ever grows a long-
+// running mode (daemon, in-process command replay), this assumption no
+// longer holds and the globals must be replaced by an immutable Config
+// snapshot threaded through callers.
+//
+// TODO (post-v1): three globals is the threshold where threading config
+// through callers becomes worth doing. The proposed shape: NewRoot
+// returns (*cobra.Command, *Config) with Config carrying typed accessors
+// (`JSONMode() bool`, `NonInteractive() bool`, `Verbose() int`); cmd/gitraft
+// receives the Config back and passes it where needed instead of
+// importing the package-level getter. See type-design review on
+// commit 9a51ee9.
 var (
 	verbose        int
 	nonInteractive bool
@@ -31,7 +47,9 @@ func NewRoot() *cobra.Command {
 	root.PersistentFlags().BoolVar(&nonInteractive, "non-interactive", false,
 		"disable interactive prompts (auto-disabled when stdin/stdout is not a TTY, when CI is set, or when TERM=dumb; cannot be forced on)")
 	root.PersistentFlags().BoolVar(&jsonOutput, "json", false,
-		"emit NDJSON events on stdout instead of human-readable logs on stderr; implies --non-interactive (no wizard, no spinner)")
+		"emit NDJSON events on stdout (all log levels including ERROR; stderr is unused under --json) instead of human-readable logs on stderr; "+
+			"behaves like --non-interactive (no wizard, no spinner). "+
+			"Note: --help and --version still produce plain text — they predate the JSON contract.")
 	root.AddCommand(newMigrateCmd())
 	return root
 }

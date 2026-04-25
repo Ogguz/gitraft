@@ -24,6 +24,9 @@ func isTTY(f *os.File) bool {
 //
 // Returns false when ANY of the following is true:
 //   - the --non-interactive flag is set,
+//   - the --json flag is set (a wizard would block the script driving
+//     gitraft; the spinner's separate silencing happens at progress.go
+//     and is NOT enforced by this gate),
 //   - the environment signals a non-interactive context: CI is set
 //     (any non-empty value — convention used by GitHub Actions, GitLab,
 //     CircleCI, Travis) or TERM=dumb (older Jenkins, raw shells, some
@@ -43,7 +46,7 @@ func isTTY(f *os.File) bool {
 // The helper takes the streams as parameters rather than referencing
 // os.Stdin/os.Stdout directly so tests can substitute pipe-backed files.
 func isInteractive(stdin, stdout *os.File) bool {
-	if nonInteractive {
+	if nonInteractive || jsonOutput {
 		return false
 	}
 	if envDisablesInteractive() {

@@ -15,6 +15,22 @@ import (
 	"strings"
 )
 
+// URLUserSentinel is the literal that replaces userinfo in HTTP(S) URLs and
+// SSH URLs with passwords. Exported so tests (and downstream consumers) can
+// assert against the contract by reference rather than hardcoded string —
+// renaming this value is a breaking change to any consumer that pattern-
+// matches log output.
+//
+// Distinct from [AttrSentinel]: this one lives INSIDE a URL's userinfo
+// position (`https://redacted@host/...`); [AttrSentinel] is the standalone
+// value an entire sensitive attribute is replaced with.
+const URLUserSentinel = "redacted"
+
+// AttrSentinel is the literal value that replaces an entire sensitive
+// attribute's value (see [Sensitive] for which keys trigger this). Exported
+// for the same reason as [URLUserSentinel] — renaming is a breaking change.
+const AttrSentinel = "[redacted]"
+
 // urlWithCredsPattern matches HTTP(S) URLs that carry userinfo before the
 // host: scheme://anything-without-slash@host. The (?i) flag makes the scheme
 // match case-insensitive so `HTTPS://` and `Https://` aren't bypass paths.
@@ -33,7 +49,7 @@ func String(s string) string {
 	if s == "" {
 		return s
 	}
-	return urlWithCredsPattern.ReplaceAllString(s, "${1}redacted@")
+	return urlWithCredsPattern.ReplaceAllString(s, "${1}"+URLUserSentinel+"@")
 }
 
 // URL strips userinfo from a parseable URL. SSH-family URLs only pass
@@ -64,9 +80,9 @@ func URL(raw string) string {
 			return raw
 		}
 	}
-	// url.User("redacted") avoids the percent-encoding that url.UserPassword
-	// would apply to reserved characters in the redaction sentinel.
-	u.User = url.User("redacted")
+	// url.User(URLUserSentinel) avoids the percent-encoding that
+	// url.UserPassword would apply to reserved characters in the sentinel.
+	u.User = url.User(URLUserSentinel)
 	return u.String()
 }
 

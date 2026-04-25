@@ -10,7 +10,7 @@ import (
 // attributes (and string-like Any/Group attributes) flowing through it.
 // URL userinfo is stripped from any HTTP(S) URLs in messages and string
 // attribute values; attributes whose key looks sensitive ([Sensitive]) have
-// their value replaced with "[redacted]".
+// their value replaced with [AttrSentinel].
 //
 // The wrapper preserves the inner handler's level filtering and grouping
 // behavior. Group/with-attrs additions are themselves redacted before being
@@ -78,7 +78,7 @@ func (h *handler) WithGroup(name string) slog.Handler {
 //   - other kinds (number, duration, etc.) → pass through unchanged
 func redactAttr(attr slog.Attr) slog.Attr {
 	if Sensitive(attr.Key) {
-		return slog.String(attr.Key, "[redacted]")
+		return slog.String(attr.Key, AttrSentinel)
 	}
 	switch attr.Value.Kind() {
 	case slog.KindString:

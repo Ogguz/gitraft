@@ -23,7 +23,7 @@ func progressSuffix(srcRaw, dstRaw string) string {
 }
 
 // progressIndicator wraps a CLI spinner with a no-op fallback for
-// non-interactive environments (CI, piped stdout, --non-interactive,
+// non-interactive environments (CI, piped stdout, --non-interactive, --json,
 // redirected stderr).
 //
 // In interactive mode the spinner shows a rotating glyph + suffix on stderr
@@ -32,10 +32,24 @@ func progressSuffix(srcRaw, dstRaw string) string {
 // are no-ops and progress is conveyed through slog Info logs instead — see
 // [newLoggerTo] for the verbosity ladder.
 //
+// CONTRACT for callers: every prog.Start/prog.Update call MUST be paired
+// with a logger.Info that conveys the same phase information, because in
+// silent mode the spinner is the only channel that goes dark. A future
+// maintainer adding a new phase like prog.Update("starting LFS fetch")
+// without a paired logger.Info will leave --json users (and CI runs)
+// without visibility into that phase. Today every callsite in
+// migrate.go/mirror.Run follows this contract; future code must too.
+//
 // The spinner and slog both write to stderr; in interactive mode they can
 // briefly interleave when slog emits a Warn (e.g., a submodule warning).
 // That's an acceptable trade-off for v0.4: the spinner redraws on its next
 // tick, and warnings are short.
+//
+// TODO (post-v1): with three behavioral states (active spinner, silent,
+// future "emit progress as JSON events"), promote progressIndicator to an
+// interface with concrete spinnerIndicator/noopIndicator/jsonIndicator
+// impls. Today the nil-spinner sentinel works because there are only two
+// states. See type-design review on commit 9a51ee9.
 type progressIndicator struct {
 	// mu serializes Start/Stop/Update across goroutines. The wrapper's
 	// callers today are sequential (main goroutine drives the migration
@@ -68,6 +82,19 @@ type progressIndicator struct {
 // directly) lets tests force the active path without spinning up a real
 // pty, mirroring the wizard's seam.
 func newProgressIndicator(w io.Writer, stdin, stdout *os.File, msg string) *progressIndicator {
+	// Belt-and-suspenders: --json mode silences the spinner unconditionally
+	// because spinner ANSI control sequences would corrupt the NDJSON
+	// stream on stdout. In production this branch is redundant —
+	// [isInteractive] (the implementation isInteractiveFn points at) also
+	// returns false when jsonOutput is set, so the next gate would catch
+	// it. The explicit check matters in tests: makeFakeTTYPair (used by
+	// TestJSONMode_DisablesProgressIndicator) overrides isInteractiveFn
+	// with a stub that ignores jsonOutput, so without this gate the
+	// spinner would activate in that test. Removing this line would
+	// silently break that test — keep both gates.
+	if jsonOutput {
+		return &progressIndicator{}
+	}
 	if !isInteractiveFn(stdin, stdout) {
 		return &progressIndicator{}
 	}
