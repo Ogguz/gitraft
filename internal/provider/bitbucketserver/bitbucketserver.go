@@ -70,7 +70,7 @@ func New(opts Options) *Provider {
 
 func refuseRedirect(req *http.Request, via []*http.Request) error {
 	prev := via[len(via)-1].URL
-	return fmt.Errorf("bitbucket-server: refusing redirect (%s → %s); repository may have been moved", prev, req.URL)
+	return fmt.Errorf("bitbucket-server: refusing redirect (%s → %s); repository may have been moved\nhint: copy the current repository URL from your Bitbucket Server's web UI and rerun gitraft with the updated URL", prev, req.URL)
 }
 
 // Provider is the Bitbucket Server implementation of provider.Provider.
@@ -127,7 +127,7 @@ func (p *Provider) ParseRepo(u *url.URL) (string, string, error) {
 	if len(parts) == 2 && parts[0] != "scm" && parts[0] != "projects" {
 		return parts[0], strings.TrimSuffix(parts[1], ".git"), nil
 	}
-	return "", "", fmt.Errorf("bitbucket-server: URL %q path is not /scm/{project}/{repo} or /projects/{project}/repos/{repo}", u)
+	return "", "", fmt.Errorf("bitbucket-server: URL %q path is not /scm/{project}/{repo} or /projects/{project}/repos/{repo}\nhint: copy the HTTPS clone URL from the repo's Clone dialog (form: /scm/PROJECT/repo.git) OR the URL from your browser's address bar (form: /projects/PROJECT/repos/repo); also confirm --bitbucket-url points at the right server", u)
 }
 
 func (p *Provider) RepoExists(ctx context.Context, project, repo string) (bool, error) {
@@ -206,13 +206,13 @@ func (p *Provider) AuthURL(u *url.URL) (string, error) {
 	case p.username == "" && p.token == "":
 		return u.String(), nil
 	case p.username == "" || p.token == "":
-		return "", fmt.Errorf("bitbucket-server: BITBUCKET_SERVER_USERNAME and BITBUCKET_SERVER_TOKEN must be set together (one is empty)")
+		return "", fmt.Errorf("bitbucket-server: BITBUCKET_SERVER_USERNAME and BITBUCKET_SERVER_TOKEN must be set together\nhint: only one of the two is set — set both, or unset both to fall back to anonymous access (public repos only)")
 	}
 	if !strings.EqualFold(u.Scheme, "https") && !strings.EqualFold(u.Scheme, "http") {
 		return u.String(), nil
 	}
 	if u.User != nil {
-		return "", fmt.Errorf("bitbucket-server: URL for %s already has embedded credentials; remove them or unset BITBUCKET_SERVER_USERNAME/BITBUCKET_SERVER_TOKEN", u.Hostname())
+		return "", fmt.Errorf("bitbucket-server: URL for %s already has embedded credentials\nhint: remove the userinfo from the URL, or unset BITBUCKET_SERVER_USERNAME and BITBUCKET_SERVER_TOKEN to fall back to the URL's embedded credentials", u.Hostname())
 	}
 	authed := *u
 	authed.User = url.UserPassword(p.username, p.token)
@@ -245,15 +245,15 @@ func (p *Provider) newRequest(ctx context.Context, method, path string, body any
 func (p *Provider) apiError(resp *http.Response, op string) error {
 	if resp.StatusCode == http.StatusTooManyRequests {
 		if retry := resp.Header.Get("Retry-After"); retry != "" {
-			return fmt.Errorf("bitbucket-server: %s: rate limited; retry after %s seconds", op, retry)
+			return fmt.Errorf("bitbucket-server: %s: rate limited; retry after %s seconds\nhint: wait the requested seconds before retrying", op, retry)
 		}
-		return fmt.Errorf("bitbucket-server: %s: rate limited", op)
+		return fmt.Errorf("bitbucket-server: %s: rate limited\nhint: wait before retrying; ask your Bitbucket Server admin if the rate-limit threshold is too aggressive for migration workflows", op)
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		if p.username == "" || p.token == "" {
-			return fmt.Errorf("bitbucket-server: %s: 401 Unauthorized (BITBUCKET_SERVER_USERNAME/BITBUCKET_SERVER_TOKEN unset; private repos require credentials)", op)
+			return fmt.Errorf("bitbucket-server: %s: 401 Unauthorized\nhint: BITBUCKET_SERVER_USERNAME/BITBUCKET_SERVER_TOKEN unset; private repos require credentials", op)
 		}
-		return fmt.Errorf("bitbucket-server: %s: 401 Unauthorized (verify BITBUCKET_SERVER_TOKEN has not expired or been revoked)", op)
+		return fmt.Errorf("bitbucket-server: %s: 401 Unauthorized\nhint: verify BITBUCKET_SERVER_TOKEN has not expired or been revoked, and that the user can access the repo via the web UI", op)
 	}
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	msg := strings.TrimSpace(string(b))
@@ -296,7 +296,13 @@ func isAlreadyExists(body []byte) bool {
 // error far from the root cause.
 func (p *Provider) requireConfigured() error {
 	if p.baseURL == "" {
-		return errors.New("bitbucket-server: not configured; set --bitbucket-url=<your bitbucket server URL>")
+		// The YAML key is `bitbucket-server` (hyphen) per
+		// internal/config/config.go's `yaml:"bitbucket-server"` tag —
+		// NOT `bitbucket_server` (underscore). With KnownFields(true)
+		// in config.Load, the wrong form would surface as "unknown
+		// field bitbucket_server" pointing the user at exactly the
+		// wrong correction.
+		return errors.New("bitbucket-server: not configured\nhint: set --bitbucket-url=<your bitbucket server URL> (or the `providers.bitbucket-server.url` field in the config file) before migrating to a Bitbucket Server / Data Center instance")
 	}
 	return nil
 }

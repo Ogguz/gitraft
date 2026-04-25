@@ -494,6 +494,47 @@ func TestWriteExitError_Shape(t *testing.T) {
 	}
 }
 
+// TestWriteExitError_NewlineRoundTrip locks the documented JSON wire
+// contract: operational errors carry a `\nhint:` preamble, and the
+// newline must encode as a `\n` escape inside the JSON string (not be
+// flattened or split across multiple records). Consumers run
+// `jq -r '.error'` to recover the multi-line form.
+//
+// If a future maintainer changes WriteExitError to pre-flatten newlines
+// (e.g., to support a one-line-per-event log aggregator), this test
+// fires — the contract change must be deliberate.
+func TestWriteExitError_NewlineRoundTrip(t *testing.T) {
+	original := "clone src-url: connection refused\nhint: verify the URL is reachable"
+	var buf bytes.Buffer
+	if err := WriteExitError(&buf, errors.New(original)); err != nil {
+		t.Fatalf("WriteExitError: %v", err)
+	}
+	out := buf.String()
+	// Wire form must contain the JSON-escape `\n`, NOT a literal newline
+	// inside the string. (The trailing newline at the end of the line is
+	// the NDJSON record separator and is fine.)
+	body := strings.TrimSuffix(out, "\n")
+	if !strings.Contains(body, `\n`) {
+		t.Errorf("expected JSON-escaped \\n in wire body; got %q", body)
+	}
+	if strings.Count(body, "\n") != 0 {
+		t.Errorf("JSON body must not contain literal newlines (would break NDJSON); got %q", body)
+	}
+	// Round-trip: decoding the JSON must recover the original `\n`.
+	var ev ExitErrorEvent
+	if err := json.Unmarshal([]byte(body), &ev); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if ev.Error != original {
+		t.Errorf("round-trip mismatch:\n got: %q\nwant: %q", ev.Error, original)
+	}
+	// Sanity check: the recovered error contains a real `\n` (not the
+	// escape literal) — this is what `jq -r '.error'` would produce.
+	if !strings.Contains(ev.Error, "\nhint:") {
+		t.Errorf("recovered error should contain a real \\nhint: preamble; got %q", ev.Error)
+	}
+}
+
 // TestWriteExitError_RedactsURL pins the redaction guarantee on the
 // final-exit path. A removed redact.String wrap inside WriteExitError
 // would let a wrapped clone error like

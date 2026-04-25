@@ -918,11 +918,11 @@ func TestNewLogger_OutputIsRedacted(t *testing.T) {
 // TestNewLoggerTo_VerbosityLadder pins the verbosity contract so a future
 // refactor can't silently regress the default level.
 //
-// Phase 4d intentionally raised the default rung from Warn to Info: users
-// who run gitraft without `-v` should still see phase markers like
-// "cloning source" / "pushing destination". `-v` and `-vv` both currently
-// resolve to Debug; the count is preserved for forward compatibility but
-// must not _drop_ levels below what the previous step emitted.
+// The default rung is intentionally Info (not Warn): users who run
+// gitraft without `-v` should still see phase markers like "cloning
+// source" / "pushing destination". `-v` and `-vv` both currently
+// resolve to Debug; the count is preserved for forward compatibility
+// but must not _drop_ levels below what the previous step emitted.
 func TestNewLoggerTo_VerbosityLadder(t *testing.T) {
 	cases := []struct {
 		name   string

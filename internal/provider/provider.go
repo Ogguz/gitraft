@@ -81,7 +81,7 @@ type CreateOptions struct {
 func Parse(raw string) (*url.URL, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil, fmt.Errorf("empty URL")
+		return nil, fmt.Errorf("empty URL\nhint: expected a git repository URL like https://github.com/owner/repo.git or git@host:owner/repo.git")
 	}
 	// Convert scp-like SSH (user@host:path) to ssh://user@host/path so the
 	// stdlib url package can parse it.
@@ -94,10 +94,10 @@ func Parse(raw string) (*url.URL, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("parse %q: %w", raw, err)
+		return nil, fmt.Errorf("parse %q: %w\nhint: expected a git repository URL like https://github.com/owner/repo.git or git@host:owner/repo.git", raw, err)
 	}
 	if u.Host == "" {
-		return nil, fmt.Errorf("URL %q has no host", raw)
+		return nil, fmt.Errorf("URL %q has no host\nhint: include a scheme (https:// or ssh://) and host — e.g. https://github.com/owner/repo.git or git@host:owner/repo.git", raw)
 	}
 	return u, nil
 }
@@ -129,7 +129,7 @@ func ByName(ps []Provider, name string) Provider {
 func SplitPath(u *url.URL) (owner, name string, err error) {
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	if len(parts) != 2 {
-		return "", "", fmt.Errorf("URL %q path must be /owner/repo; got %d segments", u, len(parts))
+		return "", "", fmt.Errorf("URL %q path must be /owner/repo; got %d segments\nhint: this provider does not support nested paths — use the canonical /owner/repo or /owner/repo.git form", u, len(parts))
 	}
 	return parts[0], strings.TrimSuffix(parts[1], ".git"), nil
 }

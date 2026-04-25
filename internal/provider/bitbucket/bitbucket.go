@@ -52,7 +52,7 @@ func New(opts Options) *Provider {
 
 func refuseRedirect(req *http.Request, via []*http.Request) error {
 	prev := via[len(via)-1].URL
-	return fmt.Errorf("bitbucket: refusing redirect (%s → %s); repository may have been moved", prev, req.URL)
+	return fmt.Errorf("bitbucket: refusing redirect (%s → %s); repository may have been moved\nhint: copy the current repository URL from Bitbucket's web UI and rerun gitraft with the updated URL", prev, req.URL)
 }
 
 // Provider is the Bitbucket Cloud implementation of provider.Provider.
@@ -143,13 +143,13 @@ func (p *Provider) AuthURL(u *url.URL) (string, error) {
 		return u.String(), nil
 	case p.username == "" || p.appPassword == "":
 		// Half-set is configuration error, not a fallback — surface it loudly.
-		return "", fmt.Errorf("bitbucket: BITBUCKET_USERNAME and BITBUCKET_APP_PASSWORD must be set together (one is empty)")
+		return "", fmt.Errorf("bitbucket: BITBUCKET_USERNAME and BITBUCKET_APP_PASSWORD must be set together\nhint: only one of the two is set — set both, or unset both to fall back to anonymous access (public repos only)")
 	}
 	if !strings.EqualFold(u.Scheme, "https") && !strings.EqualFold(u.Scheme, "http") {
 		return u.String(), nil
 	}
 	if u.User != nil {
-		return "", fmt.Errorf("bitbucket: URL for %s already has embedded credentials; remove them or unset BITBUCKET_USERNAME/BITBUCKET_APP_PASSWORD", u.Hostname())
+		return "", fmt.Errorf("bitbucket: URL for %s already has embedded credentials\nhint: remove the userinfo from the URL, or unset BITBUCKET_USERNAME and BITBUCKET_APP_PASSWORD to fall back to the URL's embedded credentials", u.Hostname())
 	}
 	authed := *u
 	authed.User = url.UserPassword(p.username, p.appPassword)
@@ -181,15 +181,28 @@ func (p *Provider) newRequest(ctx context.Context, method, path string, body any
 
 // apiError turns a non-2xx response into an actionable error. Surfaces
 // rate-limit headers and special-cases 401 when no credentials are set.
+//
+// App Password deprecation note: as of 2025-09-09 Atlassian no longer
+// allows creating new App Passwords for Bitbucket Cloud, and existing
+// App Passwords stop working entirely on 2026-06-09. The hints
+// reference both `BITBUCKET_APP_PASSWORD` (current env var) and the
+// API-token successor; the env-var rename is tracked separately to
+// preserve config-file backward compatibility for users still on
+// pre-deprecation App Passwords. After 2026-06-09 the App Password
+// branch is dead — the env var should be aliased to BITBUCKET_API_TOKEN
+// or similar in a follow-up.
 func (p *Provider) apiError(resp *http.Response, op string) error {
 	if resp.StatusCode == http.StatusTooManyRequests {
 		if retry := resp.Header.Get("Retry-After"); retry != "" {
-			return fmt.Errorf("bitbucket: %s: rate limited; retry after %s seconds", op, retry)
+			return fmt.Errorf("bitbucket: %s: rate limited; retry after %s seconds\nhint: wait the requested seconds before retrying", op, retry)
 		}
-		return fmt.Errorf("bitbucket: %s: rate limited", op)
+		return fmt.Errorf("bitbucket: %s: rate limited\nhint: wait before retrying; if rate limits hit frequently, authenticate with BITBUCKET_USERNAME plus BITBUCKET_APP_PASSWORD (or an Atlassian API token — App Passwords are deprecated and stop working 2026-06-09)", op)
 	}
-	if resp.StatusCode == http.StatusUnauthorized && (p.username == "" || p.appPassword == "") {
-		return fmt.Errorf("bitbucket: %s: 401 Unauthorized (BITBUCKET_USERNAME/BITBUCKET_APP_PASSWORD unset; private repos require credentials)", op)
+	if resp.StatusCode == http.StatusUnauthorized {
+		if p.username == "" || p.appPassword == "" {
+			return fmt.Errorf("bitbucket: %s: 401 Unauthorized\nhint: BITBUCKET_USERNAME/BITBUCKET_APP_PASSWORD unset; private repos require credentials — Atlassian API tokens are the supported method (App Passwords are deprecated and stop working 2026-06-09; new ones can no longer be created since 2025-09-09)", op)
+		}
+		return fmt.Errorf("bitbucket: %s: 401 Unauthorized\nhint: verify the credential is valid and has not been revoked; BITBUCKET_USERNAME must be your Bitbucket username (the @-handle visible at https://bitbucket.org/account/settings/), NOT your Atlassian email — note: App Passwords are deprecated and stop working 2026-06-09, migrate to Atlassian API tokens", op)
 	}
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	msg := strings.TrimSpace(string(b))

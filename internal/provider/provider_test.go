@@ -3,6 +3,7 @@ package provider_test
 import (
 	"context"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/Ogguz/gitraft/internal/provider"
@@ -173,6 +174,64 @@ func TestVisibility_String(t *testing.T) {
 		if got := v.String(); got != want {
 			t.Errorf("%d.String() = %q; want %q", v, got, want)
 		}
+	}
+}
+
+// TestParse_ErrorsIncludeHints locks the operational-error hint contract:
+// every Parse failure (empty, malformed, no-host) carries a `\nhint:`
+// preamble showing the expected URL forms. The marker is anchored on the
+// newline (rather than bare `hint:`) because git itself emits `hint:` lines
+// on stderr — without the leading `\n`, an inner stderr-tail could satisfy
+// the assertion when our wrap actually dropped the preamble. The substring
+// check (vs. full-string match) lets wording evolve without rewriting the
+// test; the marker prefix is the locked contract.
+func TestParse_ErrorsIncludeHints(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"empty", ""},
+		{"no host", "just-a-path"},
+		// Forces url.Parse to fail (unterminated IPv6 literal), exercising
+		// the parse-fail wrap distinct from the empty / no-host paths.
+		{"malformed url", "http://[::1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := provider.Parse(tc.raw)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "\nhint:") {
+				t.Errorf("error must include `\\nhint:` preamble (newline-anchored); got %q", msg)
+			}
+			// The hint should mention at least one of the expected forms so
+			// users know what to type.
+			if !strings.Contains(msg, "https://") && !strings.Contains(msg, "git@") {
+				t.Errorf("hint should show an example URL form (https:// or git@); got %q", msg)
+			}
+		})
+	}
+}
+
+// TestSplitPath_NestedPathHint verifies the SplitPath hint mentions the
+// canonical /owner/repo form so users redirected here from a provider's
+// ParseRepo can act on the message.
+func TestSplitPath_NestedPathHint(t *testing.T) {
+	u, err := provider.Parse("https://github.com/a/b/c")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	_, _, err = provider.SplitPath(u)
+	if err == nil {
+		t.Fatal("expected error for nested path")
+	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("error must include `\\nhint:` preamble (newline-anchored); got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "/owner/repo") {
+		t.Errorf("hint should reference the /owner/repo form; got %q", err.Error())
 	}
 }
 

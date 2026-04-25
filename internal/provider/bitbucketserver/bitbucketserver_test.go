@@ -78,6 +78,18 @@ func TestParseRepo(t *testing.T) {
 				if err == nil {
 					t.Fatal("expected error")
 				}
+				// Malformed-path errors must point the user at the canonical
+				// Bitbucket Server URL forms so they can copy from the clone
+				// dialog rather than guessing. Anchored on `\nhint:` (newline
+				// preamble) rather than bare `hint:` because git itself emits
+				// `hint:` lines on stderr — without the leading newline, an
+				// unrelated stderr-tail could satisfy this assertion.
+				if !strings.Contains(err.Error(), "\nhint:") {
+					t.Errorf("ParseRepo error must include a `\\nhint:` preamble (newline-anchored); got %v", err)
+				}
+				if !strings.Contains(err.Error(), "/scm/") || !strings.Contains(err.Error(), "/projects/") {
+					t.Errorf("hint should reference both /scm/ and /projects/ canonical forms; got %v", err)
+				}
 				return
 			}
 			if err != nil {
@@ -232,6 +244,9 @@ func TestRepoExists_RefusesRedirect(t *testing.T) {
 	if !strings.Contains(err.Error(), "redirect") {
 		t.Errorf("expected 'redirect' in error; got %v", err)
 	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("redirect-refusal error must include a `\\nhint:` preamble; got %v", err)
+	}
 }
 
 func TestRepoExists_RateLimited(t *testing.T) {
@@ -249,6 +264,9 @@ func TestRepoExists_RateLimited(t *testing.T) {
 	if !strings.Contains(err.Error(), "rate limited") || !strings.Contains(err.Error(), "90") {
 		t.Errorf("expected rate-limit + Retry-After; got %v", err)
 	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("rate-limit error must include a `\\nhint:` preamble; got %v", err)
+	}
 }
 
 func TestRepoExists_UnauthorizedWithoutCredentials(t *testing.T) {
@@ -265,6 +283,9 @@ func TestRepoExists_UnauthorizedWithoutCredentials(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "BITBUCKET_SERVER_USERNAME") {
 		t.Errorf("expected credential hint; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("401 error must include a `\\nhint:` preamble; got %v", err)
 	}
 }
 
@@ -458,6 +479,15 @@ func TestRepoExists_NotConfiguredErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "--bitbucket-url") {
 		t.Errorf("expected '--bitbucket-url' hint; got %v", err)
 	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("not-configured error must include a `\\nhint:` preamble; got %v", err)
+	}
+	// Lock the canonical YAML config-key form (hyphen, not underscore) so a
+	// regression to `bitbucket_server.url` is caught — KnownFields(true) in
+	// config.Load would steer users at exactly the wrong correction.
+	if !strings.Contains(err.Error(), "providers.bitbucket-server.url") {
+		t.Errorf("hint should reference canonical YAML config key `providers.bitbucket-server.url`; got %v", err)
+	}
 }
 
 func TestCreateRepo_NotConfiguredErrors(t *testing.T) {
@@ -468,6 +498,9 @@ func TestCreateRepo_NotConfiguredErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--bitbucket-url") {
 		t.Errorf("expected '--bitbucket-url' hint; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("not-configured error must include a `\\nhint:` preamble; got %v", err)
 	}
 }
 
@@ -486,5 +519,8 @@ func TestRepoExists_UnauthorizedWithCredentials(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "expired") && !strings.Contains(err.Error(), "revoked") {
 		t.Errorf("expected hint about token validity (expired/revoked); got %v", err)
+	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("401 error must include a `\\nhint:` preamble; got %v", err)
 	}
 }

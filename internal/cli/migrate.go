@@ -570,7 +570,7 @@ func newLogger(v int) *slog.Logger {
 // the function reads the global at call time, so leaving stale state from
 // a previous test will pick the wrong handler.
 //
-// Verbosity ladder (Phase 4d raised the default rung):
+// Verbosity ladder:
 //
 //	 0 (no -v): Info  — phase markers like "cloning source" / "pushing"
 //	             surface by default so users get progress feedback even

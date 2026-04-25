@@ -72,6 +72,15 @@ func TestParseRepo(t *testing.T) {
 				if err == nil {
 					t.Fatal("expected error")
 				}
+				// Malformed-path errors must point the user at the expected
+				// GitLab URL form (namespace/project, with subgroups allowed)
+				// so they can self-correct without reading source. Anchored
+				// on `\nhint:` (newline preamble) rather than bare `hint:`
+				// because git itself emits `hint:` lines on stderr — without
+				// the leading newline, an unrelated tail could satisfy this.
+				if !strings.Contains(err.Error(), "\nhint:") {
+					t.Errorf("ParseRepo error must include a `\\nhint:` preamble (newline-anchored); got %v", err)
+				}
 				return
 			}
 			if err != nil {
@@ -188,6 +197,12 @@ func TestRepoExists_RefusesRedirect(t *testing.T) {
 	if !strings.Contains(err.Error(), "redirect") {
 		t.Errorf("expected 'redirect' in error; got %v", err)
 	}
+	// Redirect-refusal must point the user at the most likely fix
+	// (rename/move at the source) so they don't misdiagnose it as a
+	// gitraft bug. Anchored on `\nhint:` (newline preamble).
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("redirect-refusal error must include a `\\nhint:` preamble (newline-anchored); got %v", err)
+	}
 }
 
 func TestRepoExists_RateLimited(t *testing.T) {
@@ -205,6 +220,9 @@ func TestRepoExists_RateLimited(t *testing.T) {
 	if !strings.Contains(err.Error(), "rate limited") || !strings.Contains(err.Error(), "30") {
 		t.Errorf("expected rate-limit with Retry-After; got %v", err)
 	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("rate-limit error must include a `\\nhint:` preamble; got %v", err)
+	}
 }
 
 func TestRepoExists_UnauthorizedWithoutToken(t *testing.T) {
@@ -221,6 +239,37 @@ func TestRepoExists_UnauthorizedWithoutToken(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "GITLAB_TOKEN is unset") {
 		t.Errorf("expected helpful token hint; got %v", err)
+	}
+	// Lock the `\nhint:` preamble form so a regression to the old
+	// inline-parenthetical style would fail. Without this, the
+	// "GITLAB_TOKEN is unset" substring survives both formats.
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("401 error must include a `\\nhint:` preamble; got %v", err)
+	}
+}
+
+// TestRepoExists_UnauthorizedWithToken locks the bad/expired-token 401
+// hint branch — distinct from the empty-token branch above. A regression
+// that collapses the two would be caught here.
+func TestRepoExists_UnauthorizedWithToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	p := gitlab.New(gitlab.Options{BaseURL: srv.URL, Token: "expired-or-revoked"})
+	_, err := p.RepoExists(context.Background(), "a", "b")
+	if err == nil {
+		t.Fatal("expected 401 error")
+	}
+	if !strings.Contains(err.Error(), "401 Unauthorized") {
+		t.Errorf("expected '401 Unauthorized' in error; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("401 error must include a `\\nhint:` preamble; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "expired") || !strings.Contains(err.Error(), "revoked") {
+		t.Errorf("token-set 401 hint should mention `expired or revoked`; got %v", err)
 	}
 }
 
@@ -286,6 +335,23 @@ func TestCreateRepo_NamespaceNotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "nogroup") || !strings.Contains(err.Error(), "not found") {
 		t.Errorf("expected namespace-specific error naming the group; got %v", err)
+	}
+	// Namespace-not-found must hint at the most likely fix (token scope /
+	// membership / rename) so users don't misdiagnose as a server bug. The
+	// `\nhint:` prefix (rather than bare `hint:`) is checked because git
+	// itself emits `hint:` lines on stderr — anchoring on the newline
+	// preamble distinguishes our preamble from any inner-tail noise.
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("namespace-not-found error must include a `\\nhint:` preamble; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "GITLAB_TOKEN") {
+		t.Errorf("hint should reference GITLAB_TOKEN scope/membership; got %v", err)
+	}
+	// `api` (write) scope is the actual minimum because namespaceID is only
+	// invoked from CreateRepo, which then does POST /projects. Recommending
+	// only `read_api` would mislead users into a second failure.
+	if !strings.Contains(err.Error(), "`api` scope") {
+		t.Errorf("hint should recommend `api` scope (write), not `read_api`; got %v", err)
 	}
 	if postAttempted {
 		t.Error("POST /projects must not run when namespace lookup fails")

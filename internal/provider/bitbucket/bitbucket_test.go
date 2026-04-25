@@ -160,6 +160,9 @@ func TestRepoExists_RefusesRedirect(t *testing.T) {
 	if !strings.Contains(err.Error(), "redirect") {
 		t.Errorf("expected 'redirect' in error; got %v", err)
 	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("redirect-refusal error must include a `\\nhint:` preamble; got %v", err)
+	}
 }
 
 func TestRepoExists_RateLimited(t *testing.T) {
@@ -177,6 +180,9 @@ func TestRepoExists_RateLimited(t *testing.T) {
 	if !strings.Contains(err.Error(), "rate limited") || !strings.Contains(err.Error(), "120") {
 		t.Errorf("expected rate-limit + Retry-After; got %v", err)
 	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("rate-limit error must include a `\\nhint:` preamble; got %v", err)
+	}
 }
 
 func TestRepoExists_UnauthorizedWithoutCredentials(t *testing.T) {
@@ -193,6 +199,44 @@ func TestRepoExists_UnauthorizedWithoutCredentials(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "BITBUCKET_USERNAME") {
 		t.Errorf("expected credential hint; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("401 error must include a `\\nhint:` preamble; got %v", err)
+	}
+}
+
+// TestRepoExists_UnauthorizedWithCredentials locks the bad/expired-creds
+// 401 hint branch — distinct from the empty-creds branch above. The
+// branch was previously untested; a regression that collapses the two
+// would not have failed any test.
+func TestRepoExists_UnauthorizedWithCredentials(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	p := bitbucket.New(bitbucket.Options{
+		BaseURL:     srv.URL,
+		Username:    "alice",
+		AppPassword: "expired-or-revoked",
+	})
+	_, err := p.RepoExists(context.Background(), "a", "b")
+	if err == nil {
+		t.Fatal("expected 401 error")
+	}
+	if !strings.Contains(err.Error(), "401 Unauthorized") {
+		t.Errorf("expected '401 Unauthorized' in error; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("401 error must include a `\\nhint:` preamble; got %v", err)
+	}
+	// Hint should reference Bitbucket username (NOT email/Atlassian login)
+	// and the App Password deprecation timeline.
+	if !strings.Contains(err.Error(), "Bitbucket username") {
+		t.Errorf("hint should clarify BITBUCKET_USERNAME = Bitbucket username (not email); got %v", err)
+	}
+	if !strings.Contains(err.Error(), "2026-06-09") {
+		t.Errorf("hint should mention App Password deprecation date 2026-06-09; got %v", err)
 	}
 }
 

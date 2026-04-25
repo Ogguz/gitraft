@@ -39,6 +39,11 @@ func (errGitLFSMissing) Is(target error) bool {
 // override the LFS-presence check without invoking real git-lfs. Distinguishes
 // context cancellation from "not installed" so callers don't misreport
 // transient cancels as a missing tool.
+//
+// Test parallelism: tests that override this MUST restore via t.Cleanup
+// (or defer) and MUST NOT call t.Parallel — the override is a package
+// global shared across goroutines, so concurrent tests would interleave
+// and stage races. Same applies to runLFSLsFiles below.
 var isGitLFSAvailable = func(ctx context.Context) bool {
 	err := exec.CommandContext(ctx, "git", "lfs", "version").Run()
 	if err == nil {
@@ -89,10 +94,29 @@ func detectLFS(ctx context.Context, repoDir string) (bool, error) {
 	if isGitLFSAvailable(ctx) {
 		out, err := runLFSLsFiles(ctx, repoDir)
 		if err != nil {
-			return false, fmt.Errorf("git lfs ls-files: %w", err)
+			// Skip the remediation hint when the user cancelled — telling
+			// them to "rerun the migration" is the opposite of what they
+			// asked for. mirror.isCancellation isn't visible from this
+			// package-private helper, so check inline.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return false, fmt.Errorf("git lfs ls-files: %w", err)
+			}
+			// `git lfs ls-files --all` is a read-only enumeration over the
+			// repo's tree; it does NOT depend on `git lfs install` (which
+			// configures the per-user smudge filter). The hint avoids
+			// recommending `git lfs install` because we already verified
+			// `git lfs version` worked at the call site — the most likely
+			// cause is a corrupt mirror clone.
+			return false, fmt.Errorf("git lfs ls-files: %w\nhint: git-lfs is installed but ls-files failed; the most common cause is a corrupt or partial mirror clone — rerun the migration to retry, or rerun with -v to see git-lfs's stderr", err)
 		}
 		return len(strings.TrimSpace(string(out))) > 0, nil
 	}
+	// No `\nhint:` here: the inner detectLFSViaAttributes wraps the
+	// for-each-ref leaf failure with a specific hint; appending another
+	// preamble at this layer produced redundant advice when stacked
+	// through Run's wrap. The `scan .gitattributes for LFS:` prefix
+	// preserves the call-stack context for log readers without
+	// duplicating the leaf's remediation.
 	used, err := detectLFSViaAttributes(ctx, repoDir)
 	if err != nil {
 		return false, fmt.Errorf("scan .gitattributes for LFS: %w", err)
@@ -123,7 +147,12 @@ func looksLikeMirrorClone(repoDir string) bool {
 func detectLFSViaAttributes(ctx context.Context, repoDir string) (bool, error) {
 	refs, err := listScanRefs(ctx, repoDir)
 	if err != nil {
-		return false, fmt.Errorf("list refs: %w", err)
+		// Cancellation: hint-free wrap (the user aborted, "rerun" would
+		// contradict their intent).
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false, fmt.Errorf("list refs: %w", err)
+		}
+		return false, fmt.Errorf("list refs: %w\nhint: `git for-each-ref` failed inside the temporary clone — the refs database may be damaged; rerun the migration to retry the clone", err)
 	}
 	refs = append([]string{"HEAD"}, refs...)
 	for _, ref := range refs {

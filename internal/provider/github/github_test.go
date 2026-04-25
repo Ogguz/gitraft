@@ -127,6 +127,12 @@ func TestRepoExists_RefusesRedirect(t *testing.T) {
 	if !strings.Contains(err.Error(), "redirect") {
 		t.Errorf("expected 'redirect' in error; got %v", err)
 	}
+	// Redirect-refusal must point the user at the most likely fix
+	// (rename/move at the source) so they don't misdiagnose it as a
+	// gitraft bug. Anchored on `\nhint:` (newline preamble).
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("redirect-refusal error must include a `\\nhint:` preamble (newline-anchored); got %v", err)
+	}
 }
 
 func TestRepoExists_RateLimited(t *testing.T) {
@@ -146,6 +152,64 @@ func TestRepoExists_RateLimited(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "60") {
 		t.Errorf("expected Retry-After seconds in error; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("rate-limit error must include a `\\nhint:` preamble; got %v", err)
+	}
+}
+
+// TestRepoExists_UnauthorizedWithoutToken locks the empty-token 401 hint
+// branch (added when github apiError was converted from a free function
+// to a method). A regression that drops the empty-token branch would
+// either fall through to the catch-all wrap (no hint) or emit the
+// token-set hint (wrong remediation).
+func TestRepoExists_UnauthorizedWithoutToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	p := github.New(github.Options{BaseURL: srv.URL}) // no token
+	_, err := p.RepoExists(context.Background(), "a", "b")
+	if err == nil {
+		t.Fatal("expected 401 error")
+	}
+	if !strings.Contains(err.Error(), "401 Unauthorized") {
+		t.Errorf("expected '401 Unauthorized' in error; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("401 error must include a `\\nhint:` preamble; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "GITHUB_TOKEN unset") {
+		t.Errorf("empty-token 401 hint should mention `GITHUB_TOKEN unset`; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "repo") {
+		t.Errorf("hint should reference `repo` scope; got %v", err)
+	}
+}
+
+// TestRepoExists_UnauthorizedWithToken locks the bad/expired-token 401
+// hint branch — distinct from the empty-token branch above, so a
+// regression that collapses the two would be caught here.
+func TestRepoExists_UnauthorizedWithToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	p := github.New(github.Options{BaseURL: srv.URL, Token: "expired-or-revoked"})
+	_, err := p.RepoExists(context.Background(), "a", "b")
+	if err == nil {
+		t.Fatal("expected 401 error")
+	}
+	if !strings.Contains(err.Error(), "401 Unauthorized") {
+		t.Errorf("expected '401 Unauthorized' in error; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("401 error must include a `\\nhint:` preamble; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "expired") || !strings.Contains(err.Error(), "revoked") {
+		t.Errorf("token-set 401 hint should mention `expired or revoked`; got %v", err)
 	}
 }
 

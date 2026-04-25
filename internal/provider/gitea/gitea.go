@@ -68,7 +68,7 @@ func New(opts Options) *Provider {
 
 func refuseRedirect(req *http.Request, via []*http.Request) error {
 	prev := via[len(via)-1].URL
-	return fmt.Errorf("gitea: refusing redirect (%s → %s); repo may have been moved", prev, req.URL)
+	return fmt.Errorf("gitea: refusing redirect (%s → %s); repo may have been moved\nhint: copy the current repository URL from your Gitea instance's web UI and rerun gitraft with the updated URL", prev, req.URL)
 }
 
 // Provider is the Gitea implementation of provider.Provider.
@@ -196,7 +196,7 @@ func (p *Provider) AuthURL(u *url.URL) (string, error) {
 		return u.String(), nil
 	}
 	if u.User != nil {
-		return "", fmt.Errorf("gitea: URL for %s already has embedded credentials; remove them or unset GITEA_TOKEN", u.Hostname())
+		return "", fmt.Errorf("gitea: URL for %s already has embedded credentials\nhint: remove the userinfo from the URL, or unset GITEA_TOKEN to fall back to the URL's embedded credentials", u.Hostname())
 	}
 	authed := *u
 	// Token as URL username (no password) — Gitea's documented HTTP-token
@@ -293,7 +293,7 @@ func (p *Provider) newRequest(ctx context.Context, method, path string, body any
 // error far from the root cause (missing --gitea-url).
 func (p *Provider) requireConfigured() error {
 	if p.baseURL == "" {
-		return errors.New("gitea: not configured; set --gitea-url=<your gitea URL>")
+		return errors.New("gitea: not configured\nhint: set --gitea-url=<your gitea URL> (or the `providers.gitea.url` field in the config file) before migrating to a Gitea instance")
 	}
 	return nil
 }
@@ -301,15 +301,15 @@ func (p *Provider) requireConfigured() error {
 func (p *Provider) apiError(resp *http.Response, op string) error {
 	if resp.StatusCode == http.StatusTooManyRequests {
 		if retry := resp.Header.Get("Retry-After"); retry != "" {
-			return fmt.Errorf("gitea: %s: rate limited; retry after %s seconds", op, retry)
+			return fmt.Errorf("gitea: %s: rate limited; retry after %s seconds\nhint: wait the requested seconds before retrying", op, retry)
 		}
-		return fmt.Errorf("gitea: %s: rate limited", op)
+		return fmt.Errorf("gitea: %s: rate limited\nhint: wait before retrying; ask your Gitea admin if the rate-limit threshold is too aggressive for migration workflows", op)
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		if p.token == "" {
-			return fmt.Errorf("gitea: %s: 401 Unauthorized (GITEA_TOKEN unset; private repos require credentials)", op)
+			return fmt.Errorf("gitea: %s: 401 Unauthorized\nhint: GITEA_TOKEN unset; private repos require credentials", op)
 		}
-		return fmt.Errorf("gitea: %s: 401 Unauthorized (verify GITEA_TOKEN is valid and has not expired or been revoked)", op)
+		return fmt.Errorf("gitea: %s: 401 Unauthorized\nhint: verify GITEA_TOKEN is valid and has not expired or been revoked, and that the user can access the repo via the web UI", op)
 	}
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	msg := strings.TrimSpace(string(b))

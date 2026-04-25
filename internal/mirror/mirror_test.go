@@ -91,6 +91,56 @@ func TestRun_CloneFailureIsWrappedWithSourceURL(t *testing.T) {
 	_ = os.RemoveAll(stub.cloneTarget())
 }
 
+// TestRun_OperationalErrorsCarryHints locks the operational-error hint
+// contract for the clone and push wraps: every failure here must include a
+// `\nhint:` preamble pointing the user at the most likely fix. The marker
+// is anchored on the newline (rather than bare `hint:`) because git itself
+// emits `hint:` lines on stderr — runner.Run tees those into the wrapped
+// error, so an unanchored check could pass via inner tail noise.
+//
+// The lfs-fetch and lfs-push hint contracts are NOT locked here because
+// stubRunner doesn't write a real clone, so looksLikeMirrorClone returns
+// false and detectLFS short-circuits — the lfs branches are unreachable
+// in this external test. Those paths are locked separately in the
+// internal-package TestRun_LFSOperationalErrorsCarryHints (lfs_test.go),
+// which can override isGitLFSAvailable and runLFSLsFiles to force
+// lfsActive=true.
+//
+// The hint strings are checked by the marker prefix rather than full
+// content so wording can evolve without rewriting the test, but the
+// contract (a hint exists at all) is locked. If a future maintainer
+// drops the hint from clone or push, this test fails loudly.
+func TestRun_OperationalErrorsCarryHints(t *testing.T) {
+	tests := []struct {
+		name     string
+		errIndex int    // which call in the runner sequence fails
+		urlPart  string // substring of the URL that should appear in the wrapped error
+	}{
+		{name: "clone failure", errIndex: 0, urlPart: "src-url"},
+		{name: "push failure", errIndex: 1, urlPart: "dst-url"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubRunner{errs: map[int]error{tc.errIndex: errors.New("boom")}}
+			err := mirror.Run(context.Background(), mirror.Options{
+				Source:      "src-url",
+				Destination: "dst-url",
+				Runner:      stub,
+			})
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tc.urlPart) {
+				t.Errorf("error missing URL fragment %q: %v", tc.urlPart, err)
+			}
+			if !strings.Contains(err.Error(), "\nhint:") {
+				t.Errorf("operational error must include a `\\nhint:` preamble (newline-anchored); got: %v", err)
+			}
+			_ = os.RemoveAll(stub.cloneTarget())
+		})
+	}
+}
+
 func TestRun_PushFailureRetainsTmpEvenWithCleanup(t *testing.T) {
 	stub := &stubRunner{errs: map[int]error{1: errors.New("boom")}}
 	err := mirror.Run(context.Background(), mirror.Options{
@@ -161,6 +211,34 @@ func TestRun_ContextCancellationPropagates(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled in chain; got %v", err)
+	}
+	_ = os.RemoveAll(stub.cloneTarget())
+}
+
+// TestRun_CancellationOmitsHint locks the cancellation guard added in the
+// 4f-followup: when an operational subprocess returns context.Canceled
+// (Ctrl+C), the wrap must NOT append a remediation hint — suggesting "verify
+// the URL is reachable" or "rerun the migration" misleads the user who
+// deliberately aborted. The guard fires for clone, push, lfs fetch, lfs
+// push, and the LFS detection wraps in lfs.go.
+func TestRun_CancellationOmitsHint(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	stub := &stubRunner{errs: map[int]error{0: context.Canceled}}
+	err := mirror.Run(ctx, mirror.Options{
+		Source:      "src-url",
+		Destination: "dst-url",
+		Runner:      stub,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled in chain; got %v", err)
+	}
+	if strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("cancelled clone must not carry a remediation hint; got %v", err)
 	}
 	_ = os.RemoveAll(stub.cloneTarget())
 }

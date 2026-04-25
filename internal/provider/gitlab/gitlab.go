@@ -67,7 +67,7 @@ func New(opts Options) *Provider {
 // already closed; callers must check the error before dereferencing resp.
 func refuseRedirect(req *http.Request, via []*http.Request) error {
 	prev := via[len(via)-1].URL
-	return fmt.Errorf("gitlab: refusing redirect (%s → %s); project may have been moved", prev, req.URL)
+	return fmt.Errorf("gitlab: refusing redirect (%s → %s); project may have been moved\nhint: copy the current project URL from GitLab's web UI and rerun gitraft with the updated URL", prev, req.URL)
 }
 
 // Provider is the GitLab implementation of provider.Provider.
@@ -95,11 +95,11 @@ func (p *Provider) Matches(u *url.URL) bool {
 func (p *Provider) ParseRepo(u *url.URL) (owner, name string, err error) {
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	if len(parts) < 2 {
-		return "", "", fmt.Errorf("gitlab: URL %q does not contain a namespace/project path", u)
+		return "", "", fmt.Errorf("gitlab: URL %q does not contain a namespace/project path\nhint: GitLab URLs need at least namespace/project (e.g. https://gitlab.com/group/proj.git or git@gitlab.com:group/sub/proj.git)", u)
 	}
 	name = strings.TrimSuffix(parts[len(parts)-1], ".git")
 	if name == "" {
-		return "", "", fmt.Errorf("gitlab: URL %q has empty project name after stripping .git", u)
+		return "", "", fmt.Errorf("gitlab: URL %q has empty project name after stripping .git\nhint: the last path segment must be the project name; check for a trailing slash or a stray .git", u)
 	}
 	owner = strings.Join(parts[:len(parts)-1], "/")
 	return owner, name, nil
@@ -191,7 +191,7 @@ func (p *Provider) AuthURL(u *url.URL) (string, error) {
 		return u.String(), nil
 	}
 	if u.User != nil {
-		return "", fmt.Errorf("gitlab: URL for %s already has embedded credentials; remove them or unset GITLAB_TOKEN", u.Hostname())
+		return "", fmt.Errorf("gitlab: URL for %s already has embedded credentials\nhint: remove the userinfo from the URL, or unset GITLAB_TOKEN to fall back to the URL's embedded credentials", u.Hostname())
 	}
 	authed := *u
 	authed.User = url.UserPassword("oauth2", p.token)
@@ -215,7 +215,12 @@ func (p *Provider) namespaceID(ctx context.Context, path string) (int, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return 0, fmt.Errorf("gitlab: namespace %q not found or not visible to your token", path)
+		// Scope note: this lookup is part of CreateRepo (the only caller),
+		// which then performs POST /projects — that requires `api` (write)
+		// scope, not `read_api`. Recommending only `read_api` here would
+		// pass this call but fail the next, so the hint surfaces the
+		// scope actually needed to complete the workflow.
+		return 0, fmt.Errorf("gitlab: namespace %q not found or not visible to your token\nhint: verify the namespace exists (and has not been renamed/deleted) and that GITLAB_TOKEN has the `api` scope and is a member of the group (or owns the user namespace)", path)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return 0, p.apiError(resp, "GET /namespaces/"+encoded)
@@ -260,12 +265,24 @@ func (p *Provider) newRequest(ctx context.Context, method, path string, body any
 func (p *Provider) apiError(resp *http.Response, op string) error {
 	if resp.StatusCode == http.StatusTooManyRequests {
 		if retry := resp.Header.Get("Retry-After"); retry != "" {
-			return fmt.Errorf("gitlab: %s: rate limited; retry after %s seconds", op, retry)
+			return fmt.Errorf("gitlab: %s: rate limited; retry after %s seconds\nhint: wait the requested seconds before retrying", op, retry)
 		}
-		return fmt.Errorf("gitlab: %s: rate limited", op)
+		return fmt.Errorf("gitlab: %s: rate limited\nhint: wait before retrying; if the limit hits frequently, authenticate with GITLAB_TOKEN", op)
 	}
-	if resp.StatusCode == http.StatusUnauthorized && p.token == "" {
-		return fmt.Errorf("gitlab: %s: 401 Unauthorized (GITLAB_TOKEN is unset; private projects require a token)", op)
+	if resp.StatusCode == http.StatusUnauthorized {
+		// Empty-token and bad-token cases both surface 401; the hint
+		// covers both by pointing at the env var and its lifecycle.
+		// Scope note: `apiError` is called from RepoExists (read) and
+		// CreateRepo+namespaceID (write). The "for write operations"
+		// clause acknowledges that read-only callers could technically
+		// use `read_api`, but in gitraft today every reachable caller
+		// is part of a write workflow (ensureDestination), so `api` is
+		// the actual minimum. If a future read-only caller appears,
+		// this hint should be threaded with operation context.
+		if p.token == "" {
+			return fmt.Errorf("gitlab: %s: 401 Unauthorized\nhint: GITLAB_TOKEN is unset; private projects require a token with `api` scope", op)
+		}
+		return fmt.Errorf("gitlab: %s: 401 Unauthorized\nhint: verify GITLAB_TOKEN has not expired or been revoked, and that it has at least `api` scope for write operations", op)
 	}
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	msg := strings.TrimSpace(string(b))

@@ -180,6 +180,9 @@ func TestRepoExists_RefusesRedirect(t *testing.T) {
 	if !strings.Contains(err.Error(), "redirect") {
 		t.Errorf("expected 'redirect' in error; got %v", err)
 	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("redirect-refusal error must include a `\\nhint:` preamble; got %v", err)
+	}
 }
 
 func TestRepoExists_RateLimited(t *testing.T) {
@@ -196,6 +199,9 @@ func TestRepoExists_RateLimited(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "rate limited") || !strings.Contains(err.Error(), "45") {
 		t.Errorf("expected rate-limit + Retry-After; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("rate-limit error must include a `\\nhint:` preamble; got %v", err)
 	}
 }
 
@@ -214,6 +220,9 @@ func TestRepoExists_UnauthorizedWithoutToken(t *testing.T) {
 	if !strings.Contains(err.Error(), "GITEA_TOKEN unset") {
 		t.Errorf("expected GITEA_TOKEN-unset hint; got %v", err)
 	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("401 error must include a `\\nhint:` preamble; got %v", err)
+	}
 }
 
 func TestRepoExists_UnauthorizedWithToken(t *testing.T) {
@@ -231,6 +240,9 @@ func TestRepoExists_UnauthorizedWithToken(t *testing.T) {
 	if !strings.Contains(err.Error(), "expired") && !strings.Contains(err.Error(), "revoked") {
 		t.Errorf("expected token validity hint; got %v", err)
 	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("401 error must include a `\\nhint:` preamble; got %v", err)
+	}
 }
 
 func TestRepoExists_NotConfiguredErrors(t *testing.T) {
@@ -242,6 +254,9 @@ func TestRepoExists_NotConfiguredErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "--gitea-url") {
 		t.Errorf("expected '--gitea-url' hint; got %v", err)
 	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("not-configured error must include a `\\nhint:` preamble; got %v", err)
+	}
 }
 
 func TestCreateRepo_NotConfiguredErrors(t *testing.T) {
@@ -252,6 +267,9 @@ func TestCreateRepo_NotConfiguredErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--gitea-url") {
 		t.Errorf("expected '--gitea-url' hint; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "\nhint:") {
+		t.Errorf("not-configured error must include a `\\nhint:` preamble; got %v", err)
 	}
 }
 
