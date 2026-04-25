@@ -110,7 +110,14 @@ sboms:
 # .github/workflows/release.yml — if you rename the workflow, update the
 # README too.
 signs:
-  - cmd: cosign
+  # Two sign blocks (one for archives, one for the checksum file) so
+  # downstream verifiers don't have to deal with redundant signatures-
+  # of-signatures (signing `all` would also sign the checksum file's
+  # signature/certificate). Each block needs a unique `id` because
+  # goreleaser keys configurations by it; both defaulting to "default"
+  # produces "found 2 signs with the ID 'default'" at release time.
+  - id: archives
+    cmd: cosign
     signature: "${artifact}.sig"
     certificate: "${artifact}.pem"
     args:
@@ -119,12 +126,9 @@ signs:
       - "--output-certificate=${certificate}"
       - "--output-signature=${signature}"
       - "${artifact}"
-    # Sign archives and the checksum file; SBOMs are signed transitively
-    # (the SBOM is included in the archive). Signing every individual
-    # artifact (`all`) would also sign the checksum's checksum, which is
-    # redundant and noise for downstream verifiers.
     artifacts: archive
-  - cmd: cosign
+  - id: checksums
+    cmd: cosign
     signature: "${artifact}.sig"
     certificate: "${artifact}.pem"
     args:
