@@ -52,6 +52,19 @@ func isInteractive(stdin, stdout *os.File) bool {
 	return isTTY(stdin) && isTTY(stdout)
 }
 
+// isInteractiveFn is a package-level seam so tests can swap interactivity
+// detection without spinning up a real pty. Production wiring points at
+// [isInteractive]. Tests using [resetIsInteractiveFn] save+restore around
+// mutations.
+var isInteractiveFn = isInteractive
+
+// resetIsInteractiveFn saves+restores the package-global isInteractiveFn
+// across a test so tests don't leak state to each other.
+func resetIsInteractiveFn(t interface{ Cleanup(func()) }) {
+	prev := isInteractiveFn
+	t.Cleanup(func() { isInteractiveFn = prev })
+}
+
 // envDisablesInteractive checks the environment for signals that the
 // process is running unattended even when stdin/stdout happen to be TTYs.
 // Factored out so the env policy can be tested without spinning up a pty.

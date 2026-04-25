@@ -39,11 +39,27 @@ type migrateFlags struct {
 func newMigrateCmd() *cobra.Command {
 	var f migrateFlags
 	cmd := &cobra.Command{
-		Use:   "migrate SOURCE DESTINATION",
+		Use:   "migrate [SOURCE DESTINATION]",
 		Short: "Mirror a git repository from SOURCE to DESTINATION",
-		Args:  cobra.ExactArgs(2),
+		Long: "Mirror a git repository from SOURCE to DESTINATION.\n\n" +
+			"Run with two URL arguments for a one-shot migration, or with no\n" +
+			"arguments from a TTY to launch the interactive wizard.",
+		// Accept 0 or 2 positional args. 0 → wizard (when interactive), error
+		// (otherwise). 1 is rejected so users don't accidentally pass only
+		// half the URLs and get a confusing wizard prompt for the other half.
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) != 0 && len(args) != 2 {
+				return fmt.Errorf("expected 0 or 2 arguments (SOURCE DESTINATION), got %d", len(args))
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runMigrate(cmd.Context(), args[0], args[1], f, newLogger(verbose))
+			logger := newLogger(verbose)
+			src, dst, err := resolveSourceDest(cmd.Context(), args, os.Stdin, os.Stdout, logger)
+			if err != nil {
+				return err
+			}
+			return runMigrate(cmd.Context(), src, dst, f, logger)
 		},
 		// Cobra prints usage on RunE errors by default; suppress when our
 		// errors are domain failures rather than CLI-syntax problems.
@@ -61,6 +77,53 @@ func newMigrateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.GiteaURL, "gitea-url", "", "self-hosted Gitea base URL (no default; required to engage that provider)")
 	cmd.Flags().StringVar(&f.Config, "config", "", "path to YAML config file (default: $XDG_CONFIG_HOME/gitraft/config.yaml)")
 	return cmd
+}
+
+// resolveSourceDest returns the (source, destination) URL pair the migrate
+// command should operate on. With two positional args, those are used
+// directly. With zero args, the interactive wizard runs (in TTY+non-CI
+// environments) or the call errors with a helpful hint when interactivity
+// isn't available — we'd rather fail loudly than block a CI job waiting
+// for stdin.
+//
+// stdin/stdout are passed in (rather than the helper reaching for the
+// os globals directly) so they round-trip into [runWizard] consistently
+// and tests can substitute pipe-backed files. After resolution, an
+// empty string in either slot is treated as a hard error here so the
+// downstream provider.Parse never sees "" — the message is more
+// actionable than a parser-level "empty url".
+func resolveSourceDest(ctx context.Context, args []string, stdin, stdout *os.File, logger *slog.Logger) (string, string, error) {
+	src, dst, err := resolveSourceDestImpl(ctx, args, stdin, stdout, logger)
+	if err != nil {
+		return "", "", err
+	}
+	if src == "" || dst == "" {
+		return "", "", errors.New(
+			"source and destination URLs must both be non-empty (got empty after resolving args/wizard)",
+		)
+	}
+	return src, dst, nil
+}
+
+func resolveSourceDestImpl(ctx context.Context, args []string, stdin, stdout *os.File, logger *slog.Logger) (string, string, error) {
+	if len(args) == 2 {
+		return args[0], args[1], nil
+	}
+	if !isInteractiveFn(stdin, stdout) {
+		return "", "", errors.New(
+			"two URL arguments required (source destination); run from a TTY (and not in CI) to use the interactive wizard, or pass --non-interactive=false explicitly",
+		)
+	}
+	// Print directly to stdout so the user gets a visible heads-up before the
+	// TUI takes over — slog's default level (Warn) would suppress an Info
+	// log here.
+	_, _ = fmt.Fprintln(stdout, "Launching interactive wizard...")
+	logger.Info("no arguments — launching interactive wizard")
+	res, err := runWizardFn(ctx, stdin, stdout)
+	if err != nil {
+		return "", "", err
+	}
+	return res.source, res.destination, nil
 }
 
 func runMigrate(ctx context.Context, srcRaw, dstRaw string, f migrateFlags, logger *slog.Logger) error {
