@@ -903,7 +903,7 @@ func TestBuildProviders_PassesSettingsToProviders(t *testing.T) {
 // redaction policy; this test catches a refactor that drops the wrap.
 func TestNewLogger_OutputIsRedacted(t *testing.T) {
 	var buf bytes.Buffer
-	logger := newLoggerTo(&buf, 1) // -v: Info level
+	logger := newLoggerTo(&buf, 1) // -v: Debug level
 	logger.Info("pushing", "dst", "https://x-access-token:secret-token@github.com/x/y.git")
 
 	out := buf.String()
@@ -912,6 +912,47 @@ func TestNewLogger_OutputIsRedacted(t *testing.T) {
 	}
 	if !strings.Contains(out, "https://redacted@github.com") {
 		t.Errorf("expected URL userinfo redacted; got %s", out)
+	}
+}
+
+// TestNewLoggerTo_VerbosityLadder pins the verbosity contract so a future
+// refactor can't silently regress the default level.
+//
+// Phase 4d intentionally raised the default rung from Warn to Info: users
+// who run gitraft without `-v` should still see phase markers like
+// "cloning source" / "pushing destination". `-v` and `-vv` both currently
+// resolve to Debug; the count is preserved for forward compatibility but
+// must not _drop_ levels below what the previous step emitted.
+func TestNewLoggerTo_VerbosityLadder(t *testing.T) {
+	cases := []struct {
+		name   string
+		v      int
+		level  slog.Level
+		emits  bool
+		needle string
+	}{
+		// Default (no -v) MUST surface Info — this is the regression we want
+		// to catch if anyone "fixes" the ladder back to Warn-by-default.
+		{"v0_info_emits", 0, slog.LevelInfo, true, "phase-info"},
+		{"v0_debug_silent", 0, slog.LevelDebug, false, "phase-debug"},
+		// -v unlocks Debug; Info still flows.
+		{"v1_info_emits", 1, slog.LevelInfo, true, "phase-info"},
+		{"v1_debug_emits", 1, slog.LevelDebug, true, "phase-debug"},
+		// -vv is currently a no-op above -v; Debug still flows, nothing
+		// quieter than Debug exists in slog.
+		{"v2_debug_emits", 2, slog.LevelDebug, true, "phase-debug"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := newLoggerTo(&buf, tc.v)
+			logger.Log(context.Background(), tc.level, tc.needle)
+			got := strings.Contains(buf.String(), tc.needle)
+			if got != tc.emits {
+				t.Errorf("v=%d level=%v: emit=%v, want %v\noutput: %q",
+					tc.v, tc.level, got, tc.emits, buf.String())
+			}
+		})
 	}
 }
 

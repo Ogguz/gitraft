@@ -146,6 +146,17 @@ func runMigrate(ctx context.Context, srcRaw, dstRaw string, f migrateFlags, logg
 		return fmt.Errorf("destination: %w", err)
 	}
 
+	// In interactive terminals, show a spinner alongside the log output for
+	// "things are happening" feedback. In non-interactive contexts (CI,
+	// piped stdout, --non-interactive), the indicator is silent and progress
+	// is conveyed purely through Info logs.
+	//
+	// Started AFTER config load + URL parsing so fast input-validation
+	// failures don't produce a one-tick spinner flicker before the error.
+	prog := newProgressIndicator(os.Stderr, os.Stdin, os.Stdout, progressSuffix(srcRaw, dstRaw))
+	prog.Start()
+	defer prog.Stop()
+
 	srcProv, err := pickProvider(providers, srcURL, f.SourceProvider)
 	if err != nil {
 		return fmt.Errorf("source provider: %w", err)
@@ -532,12 +543,18 @@ func newLogger(v int) *slog.Logger {
 // newLogger but writes to an arbitrary writer. The redact wrap is the whole
 // point of the chain — applied here so a CLI test can assert it actually
 // fires (not just that the redact package works in isolation).
+//
+// Verbosity ladder (Phase 4d raised the default rung):
+//
+//	 0 (no -v): Info  — phase markers like "cloning source" / "pushing"
+//	             surface by default so users get progress feedback even
+//	             without a spinner-capable terminal.
+//	 1 (-v):    Debug — adds per-command traces.
+//	 2+(-vv):   Debug — same as -v; the count flag is preserved for
+//	             forward compatibility with sub-debug levels.
 func newLoggerTo(w io.Writer, v int) *slog.Logger {
-	level := slog.LevelWarn
-	switch {
-	case v == 1:
-		level = slog.LevelInfo
-	case v >= 2:
+	level := slog.LevelInfo
+	if v >= 1 {
 		level = slog.LevelDebug
 	}
 	return slog.New(redact.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})))
