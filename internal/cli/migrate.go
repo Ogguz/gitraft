@@ -11,6 +11,7 @@ import (
 
 	"github.com/Ogguz/gitraft/internal/mirror"
 	"github.com/Ogguz/gitraft/internal/provider"
+	"github.com/Ogguz/gitraft/internal/provider/bitbucket"
 	"github.com/Ogguz/gitraft/internal/provider/github"
 	"github.com/Ogguz/gitraft/internal/provider/gitlab"
 	"github.com/spf13/cobra"
@@ -115,7 +116,27 @@ func buildProviders(gitlabURL string) ([]provider.Provider, error) {
 	return []provider.Provider{
 		github.New(github.Options{Token: os.Getenv("GITHUB_TOKEN")}),
 		gitlab.New(gitlab.Options{Token: os.Getenv("GITLAB_TOKEN"), Host: host}),
+		bitbucket.New(bitbucket.Options{
+			Username:    os.Getenv("BITBUCKET_USERNAME"),
+			AppPassword: os.Getenv("BITBUCKET_APP_PASSWORD"),
+		}),
 	}, nil
+}
+
+// providerAuthVars maps provider name to the env vars whose presence enables
+// authenticated API calls. Multiple vars means all are required.
+var providerAuthVars = map[string][]string{
+	"github":    {"GITHUB_TOKEN"},
+	"gitlab":    {"GITLAB_TOKEN"},
+	"bitbucket": {"BITBUCKET_USERNAME", "BITBUCKET_APP_PASSWORD"},
+}
+
+// providerWarnings is the message emitted when any required env var is unset
+// for that provider. Single message per provider keeps the log compact.
+var providerWarnings = map[string]string{
+	"github":    "GITHUB_TOKEN unset; GitHub API calls will be unauthenticated (public repos only)",
+	"gitlab":    "GITLAB_TOKEN unset; GitLab API calls will be unauthenticated (public projects only)",
+	"bitbucket": "BITBUCKET_USERNAME or BITBUCKET_APP_PASSWORD unset; Bitbucket API calls will be unauthenticated (public repos only)",
 }
 
 // gitlabHost extracts a hostname (no port) from either a URL
@@ -141,8 +162,8 @@ func gitlabHost(raw string) (string, error) {
 	return host, nil
 }
 
-// warnMissingTokens emits one warning per provider in `used` whose auth token
-// env var is unset. Duplicates are collapsed so a source+dest on the same
+// warnMissingTokens emits one warning per provider in `used` whose required
+// auth env vars are unset. Duplicates collapse so a source+dest on the same
 // provider yields a single warning.
 func warnMissingTokens(logger *slog.Logger, used ...provider.Provider) {
 	seen := map[string]bool{}
@@ -155,19 +176,15 @@ func warnMissingTokens(logger *slog.Logger, used ...provider.Provider) {
 			continue
 		}
 		seen[name] = true
-		var envVar, warning string
-		switch name {
-		case "github":
-			envVar = "GITHUB_TOKEN"
-			warning = "GITHUB_TOKEN unset; GitHub API calls will be unauthenticated (public repos only)"
-		case "gitlab":
-			envVar = "GITLAB_TOKEN"
-			warning = "GITLAB_TOKEN unset; GitLab API calls will be unauthenticated (public projects only)"
-		default:
+		envVars, ok := providerAuthVars[name]
+		if !ok {
 			continue
 		}
-		if os.Getenv(envVar) == "" {
-			logger.Warn(warning)
+		for _, env := range envVars {
+			if os.Getenv(env) == "" {
+				logger.Warn(providerWarnings[name])
+				break
+			}
 		}
 	}
 }

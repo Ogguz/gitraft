@@ -222,16 +222,15 @@ func TestAuthURL_WithProviderUsesProvider(t *testing.T) {
 	}
 }
 
-func TestBuildProviders_CreatesBothProviders(t *testing.T) {
+func TestBuildProviders_CreatesAllProviders(t *testing.T) {
 	ps, err := buildProviders("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ps) != 2 {
-		t.Errorf("expected 2 providers; got %d", len(ps))
-	}
-	if provider.ByName(ps, "github") == nil || provider.ByName(ps, "gitlab") == nil {
-		t.Errorf("expected both github and gitlab providers")
+	for _, name := range []string{"github", "gitlab", "bitbucket"} {
+		if provider.ByName(ps, name) == nil {
+			t.Errorf("expected %q provider in registry", name)
+		}
 	}
 }
 
@@ -378,5 +377,31 @@ func TestWarnMissingTokens_NilProviderIgnored(t *testing.T) {
 	warnMissingTokens(logger, nil, &mockProvider{name: "github"})
 	if !strings.Contains(buf.String(), "GITHUB_TOKEN") {
 		t.Errorf("github warning expected despite nil entry; got %s", buf.String())
+	}
+}
+
+func TestWarnMissingTokens_BitbucketEitherEnvUnsetWarns(t *testing.T) {
+	cases := []struct {
+		name     string
+		username string
+		password string
+		warn     bool
+	}{
+		{"both unset", "", "", true},
+		{"username unset", "", "secret", true},
+		{"password unset", "alice", "", true},
+		{"both set", "alice", "secret", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BITBUCKET_USERNAME", tc.username)
+			t.Setenv("BITBUCKET_APP_PASSWORD", tc.password)
+			logger, buf := testLogger()
+			warnMissingTokens(logger, &mockProvider{name: "bitbucket"})
+			warned := strings.Contains(buf.String(), "BITBUCKET_USERNAME or BITBUCKET_APP_PASSWORD unset")
+			if warned != tc.warn {
+				t.Errorf("warned = %v; want %v (buf=%s)", warned, tc.warn, buf.String())
+			}
+		})
 	}
 }
