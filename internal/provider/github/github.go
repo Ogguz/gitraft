@@ -15,25 +15,57 @@ import (
 	"github.com/Ogguz/gitraft/internal/provider"
 )
 
-const defaultBaseURL = "https://api.github.com"
+// Default hostname / API endpoint for GitHub.com (the SaaS instance).
+// Self-hosted GitHub Enterprise Server uses a different convention —
+// see [New] for the routing logic.
+const (
+	defaultHost    = "github.com"
+	defaultBaseURL = "https://api.github.com"
+)
 
 // Options configures a GitHub provider.
 type Options struct {
 	// Token is a Personal Access Token or installation token. Empty means
 	// unauthenticated (read-only, public-repo-only).
 	Token string
-	// BaseURL overrides the API endpoint. Used for GitHub Enterprise or tests.
+	// Host is the GitHub instance hostname. Empty means github.com (the
+	// SaaS default). For GitHub Enterprise Server, pass the GHE hostname
+	// (e.g. "github.example.com"). Used by [Provider.Matches] to route
+	// URLs and by [New] to derive the default API endpoint when BaseURL
+	// is empty.
+	Host string
+	// BaseURL overrides the API endpoint. When empty the default is
+	// derived from Host:
+	//
+	//   github.com (or empty)  → https://api.github.com   (SaaS)
+	//   any other host         → https://<host>/api/v3    (GHE convention)
+	//
+	// Tests pass an httptest server URL here to bypass derivation.
 	BaseURL string
 	// HTTPClient overrides the HTTP client. Defaults to one with a 30s
 	// timeout and redirect-following disabled.
 	HTTPClient *http.Client
 }
 
-// New constructs a GitHub provider with the given options.
+// New constructs a GitHub provider with the given options. Host empty
+// keeps the SaaS defaults (github.com routing + api.github.com endpoint);
+// a non-empty Host engages GHE mode.
 func New(opts Options) *Provider {
+	host := strings.ToLower(opts.Host)
+	if host == "" {
+		host = defaultHost
+	}
 	base := opts.BaseURL
 	if base == "" {
-		base = defaultBaseURL
+		// GHE convention: API hangs off /api/v3 of the GHE root URL,
+		// not a separate api.* subdomain like SaaS. The github.com
+		// default is preserved verbatim so existing test-no-Host cases
+		// keep hitting api.github.com.
+		if host == defaultHost {
+			base = defaultBaseURL
+		} else {
+			base = "https://" + host + "/api/v3"
+		}
 	}
 	client := opts.HTTPClient
 	if client == nil {
@@ -44,6 +76,7 @@ func New(opts Options) *Provider {
 	}
 	return &Provider{
 		token:   opts.Token,
+		host:    host,
 		baseURL: strings.TrimRight(base, "/"),
 		client:  client,
 	}
@@ -60,6 +93,7 @@ func refuseRedirect(req *http.Request, via []*http.Request) error {
 // Provider is the GitHub implementation of provider.Provider.
 type Provider struct {
 	token   string
+	host    string
 	baseURL string
 	client  *http.Client
 }
@@ -67,11 +101,18 @@ type Provider struct {
 // Name implements [provider.Provider].
 func (p *Provider) Name() string { return "github" }
 
-// Matches implements [provider.Provider]; matches github.com and www.github.com.
+// Matches implements [provider.Provider]; routes based on the configured
+// Host. SaaS mode (host = github.com) accepts both github.com and
+// www.github.com to handle the canonical-www variant; GHE mode matches
+// only the explicitly configured hostname (no implicit www. variant
+// because GHE installs typically use a single canonical hostname).
 func (p *Provider) Matches(u *url.URL) bool {
 	// Hostname strips any port (e.g. github.com:443).
 	h := strings.ToLower(u.Hostname())
-	return h == "github.com" || h == "www.github.com"
+	if p.host == defaultHost {
+		return h == defaultHost || h == "www."+defaultHost
+	}
+	return h == p.host
 }
 
 // ParseRepo implements [provider.Provider] using the canonical /owner/repo split.

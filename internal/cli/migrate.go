@@ -30,6 +30,7 @@ type migrateFlags struct {
 	Visibility     string
 	Description    string
 	SkipCreate     bool
+	GitHubURL      string
 	GitLabURL      string
 	BitbucketURL   string
 	GiteaURL       string
@@ -72,6 +73,7 @@ func newMigrateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.Visibility, "visibility", "private", "destination visibility: private|public|internal (default private — safer for migrations)")
 	cmd.Flags().StringVar(&f.Description, "description", "", "description for an auto-created destination")
 	cmd.Flags().BoolVar(&f.SkipCreate, "skip-create", false, "do not auto-create the destination if it is missing")
+	cmd.Flags().StringVar(&f.GitHubURL, "github-url", "", "self-hosted GitHub Enterprise Server base URL (no default; required to engage GHE — SaaS github.com works without this flag)")
 	cmd.Flags().StringVar(&f.GitLabURL, "gitlab-url", "", "self-hosted GitLab base URL (default: https://gitlab.com)")
 	cmd.Flags().StringVar(&f.BitbucketURL, "bitbucket-url", "", "self-hosted Bitbucket Server / Data Center URL (no default; required to engage that provider)")
 	cmd.Flags().StringVar(&f.GiteaURL, "gitea-url", "", "self-hosted Gitea base URL (no default; required to engage that provider)")
@@ -212,7 +214,7 @@ type providerSettings struct {
 }
 
 type githubSettings struct {
-	Token string
+	URL, Token string
 }
 
 func (s githubSettings) Authenticated() bool { return s.Token != "" }
@@ -279,6 +281,7 @@ func resolveSettings(f migrateFlags, cfg *config.Config) providerSettings {
 	}
 	return providerSettings{
 		GitHub: githubSettings{
+			URL:   resolve(f.GitHubURL, "", cfg.Providers.GitHub.URL),
 			Token: resolve("", os.Getenv("GITHUB_TOKEN"), cfg.Providers.GitHub.Token),
 		},
 		GitLab: gitlabSettings{
@@ -320,14 +323,15 @@ func resolve(flag, env, cfg string) string {
 // All host-bearing settings are validated and errors are joined so a user
 // with multiple bad URLs fixes everything in one round-trip.
 func buildProviders(s providerSettings) ([]provider.Provider, error) {
+	githubHostname, ghErr := githubHost(s.GitHub.URL)
 	gitlabHostname, gErr := gitlabHost(s.GitLab.URL)
 	bbServerHostname, bbErr := bitbucketServerHost(s.BitbucketServer.URL)
 	giteaHostname, gtErr := giteaHost(s.Gitea.URL)
-	if gErr != nil || bbErr != nil || gtErr != nil {
-		return nil, errors.Join(gErr, bbErr, gtErr)
+	if ghErr != nil || gErr != nil || bbErr != nil || gtErr != nil {
+		return nil, errors.Join(ghErr, gErr, bbErr, gtErr)
 	}
 	return []provider.Provider{
-		github.New(github.Options{Token: s.GitHub.Token}),
+		github.New(github.Options{Token: s.GitHub.Token, Host: githubHostname}),
 		gitlab.New(gitlab.Options{Token: s.GitLab.Token, Host: gitlabHostname}),
 		bitbucket.New(bitbucket.Options{
 			Username:    s.Bitbucket.Username,
@@ -385,6 +389,13 @@ func parseHostFromURL(raw, flagName string) (string, error) {
 		return "", fmt.Errorf("invalid %s %q: no host", flagName, raw)
 	}
 	return host, nil
+}
+
+// githubHost reads --github-url; empty means "use the github.com default".
+// Self-hosted GitHub Enterprise Server users must set this so the provider
+// derives the GHE-style /api/v3 endpoint and routes URLs by hostname.
+func githubHost(raw string) (string, error) {
+	return parseHostFromURL(raw, "--github-url")
 }
 
 // gitlabHost reads --gitlab-url; empty means "use the gitlab.com default".

@@ -44,8 +44,12 @@ type Providers struct {
 	Gitea           GiteaProvider           `yaml:"gitea"`
 }
 
-// GitHubProvider is the github.com provider section.
+// GitHubProvider is the GitHub (SaaS or GitHub Enterprise Server) provider
+// section. URL empty means github.com (the SaaS default); a non-empty URL
+// engages GHE mode (the provider's /api/v3 endpoint and host-specific
+// URL routing).
 type GitHubProvider struct {
+	URL   string `yaml:"url"`
 	Token string `yaml:"token"`
 }
 
@@ -139,6 +143,7 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("%s: URL %q must include scheme and host", field, raw))
 		}
 	}
+	check("providers.github.url", c.Providers.GitHub.URL)
 	check("providers.gitlab.url", c.Providers.GitLab.URL)
 	check("providers.bitbucket-server.url", c.Providers.BitbucketServer.URL)
 	check("providers.gitea.url", c.Providers.Gitea.URL)

@@ -384,3 +384,129 @@ func TestParseRepo(t *testing.T) {
 		t.Errorf("got (%q, %q)", owner, name)
 	}
 }
+
+// ---- GitHub Enterprise Server (GHE) routing ----
+//
+// Verifies that setting Options.Host engages GHE mode: Matches routes by
+// the configured hostname (no implicit www. variant), and the default API
+// base URL is derived as https://<host>/api/v3 rather than the SaaS
+// api.github.com endpoint. This is the contract --github-url depends on.
+
+// TestMatches_GHEHost asserts the routing rules differ from SaaS mode:
+// the configured host is the only one that matches, github.com itself
+// does NOT match a GHE-configured provider.
+func TestMatches_GHEHost(t *testing.T) {
+	p := github.New(github.Options{Host: "github.example.com"})
+	tests := []struct {
+		raw  string
+		want bool
+	}{
+		{"https://github.example.com/a/b.git", true},
+		{"git@github.example.com:a/b.git", true},
+		{"https://github.example.com:443/a/b.git", true},
+		// Unlike SaaS mode, www. is not implicitly accepted — GHE installs
+		// typically have one canonical hostname.
+		{"https://www.github.example.com/a/b.git", false},
+		// SaaS github.com must NOT match a GHE-configured provider, or
+		// users with both flags would route GHE traffic through SaaS auth.
+		{"https://github.com/a/b.git", false},
+		{"https://gitlab.com/a/b.git", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.raw, func(t *testing.T) {
+			u, err := provider.Parse(tc.raw)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if got := p.Matches(u); got != tc.want {
+				t.Errorf("Matches(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNew_GHEDerivesApiV3BaseURL verifies the default API endpoint logic:
+// when Host is set and BaseURL is empty, the provider derives
+// https://<host>/api/v3 (the GHE convention) and routes API calls
+// through it. Tested via a recording RoundTripper rather than an
+// httptest server because we want to observe the URL the provider
+// *attempted* to reach, not just whether a stub server responded.
+func TestNew_GHEDerivesApiV3BaseURL(t *testing.T) {
+	rt := &recordingRoundTripper{}
+	p := github.New(github.Options{
+		Host:       "github.example.com",
+		Token:      "t",
+		HTTPClient: &http.Client{Transport: rt},
+	})
+	// Trigger any API call; we're not checking response handling, only
+	// the URL the provider built.
+	_, _ = p.RepoExists(context.Background(), "owner", "repo")
+
+	if rt.lastURL == "" {
+		t.Fatal("provider did not make an HTTP request")
+	}
+	const wantPrefix = "https://github.example.com/api/v3/repos/owner/repo"
+	if !strings.HasPrefix(rt.lastURL, wantPrefix) {
+		t.Errorf("expected URL prefix %q; got %q", wantPrefix, rt.lastURL)
+	}
+}
+
+// TestNew_BaseURLOverrideWinsOverHost verifies that an explicit BaseURL
+// overrides the host-based derivation — important so tests (and any
+// future proxy use case) can point the client at an httptest server
+// without having to also fake a hostname.
+func TestNew_BaseURLOverrideWinsOverHost(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	p := github.New(github.Options{
+		Host:    "github.example.com", // would derive https://github.example.com/api/v3
+		BaseURL: srv.URL,              // explicit override
+		Token:   "t",
+	})
+	// If BaseURL didn't win, this call would fail with DNS / connection
+	// error against github.example.com (which doesn't resolve).
+	exists, err := p.RepoExists(context.Background(), "owner", "repo")
+	if err != nil {
+		t.Fatalf("RepoExists: %v", err)
+	}
+	if !exists {
+		t.Error("expected exists=true from httptest 200 response")
+	}
+}
+
+// TestNew_DefaultsPreserveSaaSBehavior is the regression guard: with no
+// Host set, the provider must keep hitting api.github.com so existing
+// non-GHE deployments aren't broken by the GHE plumbing.
+func TestNew_DefaultsPreserveSaaSBehavior(t *testing.T) {
+	rt := &recordingRoundTripper{}
+	p := github.New(github.Options{
+		Token:      "t",
+		HTTPClient: &http.Client{Transport: rt},
+	})
+	_, _ = p.RepoExists(context.Background(), "owner", "repo")
+	const wantPrefix = "https://api.github.com/repos/owner/repo"
+	if !strings.HasPrefix(rt.lastURL, wantPrefix) {
+		t.Errorf("expected SaaS URL prefix %q; got %q", wantPrefix, rt.lastURL)
+	}
+}
+
+// recordingRoundTripper captures the URL of the last request the client
+// attempted, then returns a minimal 200 OK response. Used by GHE / SaaS
+// derivation tests where we want to observe the URL the provider built
+// without standing up an httptest server (a server's URL would mask the
+// derivation logic the test is verifying).
+type recordingRoundTripper struct {
+	lastURL string
+}
+
+func (r *recordingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.lastURL = req.URL.String()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("{}")),
+		Header:     make(http.Header),
+	}, nil
+}

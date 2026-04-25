@@ -183,22 +183,39 @@ The `--bitbucket-url` flag is required to engage the Bitbucket Server
 provider — otherwise `gitraft` would route the URL through Bitbucket Cloud's
 provider and fail the auth check.
 
+### GitHub Enterprise Server → self-hosted GitLab
+
+```bash
+export GITHUB_TOKEN=ghp_...   # GHE token (read access)
+export GITLAB_TOKEN=glpat-... # destination GitLab token (api scope)
+
+gitraft migrate \
+  --github-url=https://github.example.com \
+  --gitlab-url=https://gitlab.example.com \
+  https://github.example.com/team/api.git \
+  https://gitlab.example.com/team/api.git
+```
+
+The `--github-url` flag is required to route GHE URLs to the GitHub
+provider (without it, `gitraft` falls back to anonymous git push since
+no provider matches the GHE hostname). Pure cross-instance migrations
+within GitHub itself (GHE ↔ github.com) need two runs: the
+`--github-url` flag binds the github provider to a single host per run.
+
 ## Provider support matrix
 
 | Provider | Source | Destination | Auto-create | LFS | Notes |
 |---|---|---|---|---|---|
 | GitHub.com | ✓ | ✓ | ✓ (user + org) | ✓ | `GITHUB_TOKEN`, `repo` scope |
+| GitHub Enterprise Server | ✓ | ✓ | ✓ (user + org) | ✓ | `--github-url`, `GITHUB_TOKEN` |
 | GitLab.com | ✓ | ✓ | ✓ (user + group + subgroup) | ✓ | `GITLAB_TOKEN`, `api` scope |
 | GitLab self-hosted | ✓ | ✓ | ✓ | ✓ | `--gitlab-url` |
 | Bitbucket Cloud | ✓ | ✓ | ✓ | ✓ | `BITBUCKET_APP_PASSWORD` (not account password) |
 | Bitbucket Server / Data Center | ✓ | ✓ | ✓ | ✓ | `--bitbucket-url`, HTTP token |
 | Gitea (self-hosted) | ✓ | ✓ | ✓ (user + org) | ✓ | `--gitea-url`, `GITEA_TOKEN` |
 
-GitHub Enterprise Server (GHE), AWS CodeCommit, and Azure DevOps are not
-yet supported — GHE specifically because the provider's API base URL is
-hard-coded to `api.github.com` and there's no flag to override it. GHE
-support is tracked under the [v2 milestone](https://github.com/Ogguz/gitraft/milestones)
-together with the other hosted providers.
+AWS CodeCommit and Azure DevOps are not yet supported and are tracked
+under the [v2 milestone](https://github.com/Ogguz/gitraft/milestones).
 
 ## Configuration
 
@@ -216,6 +233,7 @@ Example config (all five providers; remove sections you don't use):
 ```yaml
 providers:
   github:
+    url: https://github.example.com   # omit for github.com (SaaS)
     token: ghp_xxx
   gitlab:
     url: https://gitlab.example.com   # omit for gitlab.com
