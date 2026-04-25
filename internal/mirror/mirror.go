@@ -47,10 +47,54 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("clone %s: %w", opts.Source, err)
 	}
 
+	// LFS detection runs against the cloned repo on disk; skip when the
+	// runner is a stub (test/dry-run) and never wrote a real repo. Detection
+	// errors (corrupt refs DB, ctx cancellation) are fatal — silently
+	// proceeding without LFS migration on a real LFS-using repo would lose
+	// object content at the destination.
+	lfsActive, err := detectLFS(ctx, tmp)
+	if err != nil {
+		logger.Warn("LFS detection failed; temporary clone retained for inspection", "dir", tmp)
+		return fmt.Errorf("detect LFS: %w", err)
+	}
+	if lfsActive {
+		if !isGitLFSAvailable(ctx) {
+			logger.Warn("Git LFS required but not installed; temporary clone retained for inspection", "dir", tmp)
+			return ErrGitLFSMissing
+		}
+		logger.Info("Git LFS detected; fetching object content", "tmp", tmp)
+		if err := runner.Run(ctx, "git", "-C", tmp, "lfs", "fetch", "--all"); err != nil {
+			logger.Warn("LFS fetch failed; temporary clone retained for inspection", "dir", tmp)
+			return fmt.Errorf("lfs fetch: %w", err)
+		}
+	}
+
+	// Submodules: warn that they're not recursively migrated. Errors here are
+	// logged but non-fatal — submodule warnings are advisory, not migration-
+	// critical. URLs are redacted so embedded credentials don't leak to logs.
+	mods, _, smErr := listSubmodules(ctx, tmp)
+	if smErr != nil {
+		logger.Warn("submodule listing failed; submodule warnings may be incomplete", "err", smErr)
+	}
+	for _, m := range mods {
+		logger.Warn("submodule not recursively migrated; only the parent's reference is preserved",
+			"path", m.Path, "url", redactURL(m.URL))
+	}
+
 	logger.Info("pushing to destination", "dst", opts.Destination)
 	if err := runner.Run(ctx, "git", "-C", tmp, "push", "--mirror", opts.Destination); err != nil {
 		logger.Warn("push failed; temporary clone retained for inspection", "dir", tmp)
 		return fmt.Errorf("push to %s: %w", opts.Destination, err)
+	}
+
+	// LFS push happens AFTER the regular mirror push so refs already exist
+	// at the destination — git lfs push needs that to know what to upload.
+	if lfsActive {
+		logger.Info("pushing LFS objects", "dst", opts.Destination)
+		if err := runner.Run(ctx, "git", "-C", tmp, "lfs", "push", "--all", opts.Destination); err != nil {
+			logger.Warn("LFS push failed; temporary clone retained for inspection", "dir", tmp)
+			return fmt.Errorf("lfs push to %s: %w", opts.Destination, err)
+		}
 	}
 
 	// Dry-run creates an empty tmp dir; always clean it up.

@@ -1,8 +1,10 @@
 package mirror_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -272,5 +274,159 @@ func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// makeBareWithSubmoduleConfig creates a bare repo whose HEAD commit contains
+// a .gitmodules file with the given content. We don't actually
+// `git submodule add` — that requires network. Just commit the file so
+// listSubmodules can parse it.
+func makeBareWithSubmoduleConfig(t *testing.T, gitmodules string) string {
+	t.Helper()
+	root := t.TempDir()
+	work := filepath.Join(root, "work")
+	bare := filepath.Join(root, "src.git")
+
+	runGit(t, "", "-c", "init.defaultBranch=main", "init", work)
+	runGit(t, work, "config", "user.email", "test@example.com")
+	runGit(t, work, "config", "user.name", "test")
+	writeFile(t, filepath.Join(work, "README.md"), "hi\n")
+	runGit(t, work, "add", "README.md")
+	runGit(t, work, "commit", "-m", "initial")
+	writeFile(t, filepath.Join(work, ".gitmodules"), gitmodules)
+	runGit(t, work, "add", ".gitmodules")
+	runGit(t, work, "commit", "-m", "add submodule config")
+
+	runGit(t, "", "clone", "--bare", work, bare)
+	return bare
+}
+
+func TestRun_WarnsAboutSubmodules(t *testing.T) {
+	requireGit(t)
+	src := makeBareWithSubmoduleConfig(t,
+		"[submodule \"vendor/dep\"]\n\tpath = vendor/dep\n\turl = https://example.com/dep.git\n")
+	dst := makeEmptyBare(t)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	err := mirror.Run(context.Background(), mirror.Options{
+		Source:      src,
+		Destination: dst,
+		Cleanup:     true,
+		Logger:      logger,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "submodule not recursively migrated") {
+		t.Errorf("expected submodule warning in log; got %s", logged)
+	}
+	if !strings.Contains(logged, "vendor/dep") {
+		t.Errorf("expected submodule path in log; got %s", logged)
+	}
+}
+
+func TestRun_WarnsForEverySubmodule(t *testing.T) {
+	requireGit(t)
+	src := makeBareWithSubmoduleConfig(t,
+		"[submodule \"a\"]\n\tpath = lib/a\n\turl = https://example.com/a.git\n"+
+			"[submodule \"b\"]\n\tpath = lib/b\n\turl = https://example.com/b.git\n"+
+			"[submodule \"c\"]\n\tpath = lib/c\n\turl = https://example.com/c.git\n")
+	dst := makeEmptyBare(t)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	err := mirror.Run(context.Background(), mirror.Options{
+		Source: src, Destination: dst, Cleanup: true, Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	logged := buf.String()
+	for _, want := range []string{"lib/a", "lib/b", "lib/c"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("expected warning for %q; got %s", want, logged)
+		}
+	}
+}
+
+func TestRun_RedactsSubmoduleCredentials(t *testing.T) {
+	requireGit(t)
+	src := makeBareWithSubmoduleConfig(t,
+		"[submodule \"x\"]\n\tpath = lib/x\n\turl = https://alice:hunter2@example.com/x.git\n")
+	dst := makeEmptyBare(t)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	err := mirror.Run(context.Background(), mirror.Options{
+		Source: src, Destination: dst, Cleanup: true, Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	logged := buf.String()
+	if strings.Contains(logged, "hunter2") {
+		t.Errorf("password leaked into submodule warning log: %s", logged)
+	}
+	if strings.Contains(logged, "alice") {
+		t.Errorf("username leaked into submodule warning log: %s", logged)
+	}
+	if !strings.Contains(logged, "redacted") {
+		t.Errorf("expected redaction marker; got %s", logged)
+	}
+}
+
+func TestRun_DryRunSilentOnLFSAndSubmodules(t *testing.T) {
+	requireGit(t)
+	src := makeBareWithSubmoduleConfig(t,
+		"[submodule \"a\"]\n\tpath = lib/a\n\turl = https://example.com/a.git\n")
+	dst := makeEmptyBare(t)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	err := mirror.Run(context.Background(), mirror.Options{
+		Source:      src,
+		Destination: dst,
+		DryRun:      true, // dry-run: no real clone happens, so detection short-circuits
+		Logger:      logger,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	logged := buf.String()
+	if strings.Contains(logged, "submodule not recursively migrated") {
+		t.Errorf("dry-run must not log submodule warnings (no real clone); got %s", logged)
+	}
+	if strings.Contains(logged, "Git LFS detected") {
+		t.Errorf("dry-run must not log LFS detection (no real clone); got %s", logged)
+	}
+}
+
+func TestRun_NoSubmoduleWarningWhenAbsent(t *testing.T) {
+	requireGit(t)
+	src := makeBareWithHistory(t) // no .gitmodules
+	dst := makeEmptyBare(t)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	err := mirror.Run(context.Background(), mirror.Options{
+		Source:      src,
+		Destination: dst,
+		Cleanup:     true,
+		Logger:      logger,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if strings.Contains(buf.String(), "submodule not recursively migrated") {
+		t.Errorf("submodule warning should not fire for repo without .gitmodules; got %s", buf.String())
 	}
 }
