@@ -79,6 +79,7 @@ type Provider struct {
 	client  *http.Client
 }
 
+// Name implements [provider.Provider].
 func (p *Provider) Name() string { return "gitea" }
 
 // Matches returns true only when this provider has been configured with a
@@ -91,10 +92,13 @@ func (p *Provider) Matches(u *url.URL) bool {
 	return strings.ToLower(u.Hostname()) == p.host
 }
 
+// ParseRepo implements [provider.Provider] using the canonical /owner/repo split.
 func (p *Provider) ParseRepo(u *url.URL) (string, string, error) {
 	return provider.SplitPath(u)
 }
 
+// RepoExists implements [provider.Provider]. Errors when no host has been
+// configured (Gitea has no public-SaaS default).
 func (p *Provider) RepoExists(ctx context.Context, owner, name string) (bool, error) {
 	if err := p.requireConfigured(); err != nil {
 		return false, err
@@ -119,6 +123,10 @@ func (p *Provider) RepoExists(ctx context.Context, owner, name string) (bool, er
 	}
 }
 
+// CreateRepo implements [provider.Provider]. Routes to /orgs/<owner>/repos
+// for organization owners, /user/repos for user owners (with a
+// token-owner match check); treats 422/409 with an "already exists"
+// envelope body as [provider.ErrRepoAlreadyExists] (benign race).
 func (p *Provider) CreateRepo(ctx context.Context, opts provider.CreateOptions) error {
 	if err := p.requireConfigured(); err != nil {
 		return err
@@ -185,6 +193,8 @@ func (p *Provider) CreateRepo(ctx context.Context, opts provider.CreateOptions) 
 	return nil
 }
 
+// AuthURL implements [provider.Provider]; embeds the token as the URL
+// username (no password — Gitea's documented HTTP-token clone-URL form).
 func (p *Provider) AuthURL(u *url.URL) (string, error) {
 	if strings.EqualFold(u.Scheme, "ssh") {
 		return u.String(), nil

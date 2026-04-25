@@ -78,8 +78,12 @@ type Provider struct {
 	client  *http.Client
 }
 
+// Name implements [provider.Provider].
 func (p *Provider) Name() string { return "gitlab" }
 
+// Matches implements [provider.Provider]; compares against the configured
+// host (defaults to gitlab.com, overridable via [Options.Host] for
+// self-hosted GitLab).
 func (p *Provider) Matches(u *url.URL) bool {
 	return strings.ToLower(u.Hostname()) == p.host
 }
@@ -105,6 +109,8 @@ func (p *Provider) ParseRepo(u *url.URL) (owner, name string, err error) {
 	return owner, name, nil
 }
 
+// RepoExists implements [provider.Provider]. URL-encodes the owner/name
+// pair (subgroups contain slashes that must round-trip as %2F).
 func (p *Provider) RepoExists(ctx context.Context, owner, name string) (bool, error) {
 	projectID := url.PathEscape(owner + "/" + name)
 	req, err := p.newRequest(ctx, http.MethodGet, "/projects/"+projectID, nil)
@@ -126,6 +132,9 @@ func (p *Provider) RepoExists(ctx context.Context, owner, name string) (bool, er
 	}
 }
 
+// CreateRepo implements [provider.Provider]. Resolves the namespace path
+// to a numeric ID first (GitLab's POST /projects requires namespace_id,
+// not a path), then creates with the resolved ID.
 func (p *Provider) CreateRepo(ctx context.Context, opts provider.CreateOptions) error {
 	nsID, err := p.namespaceID(ctx, opts.Owner)
 	if err != nil {
@@ -180,6 +189,8 @@ func visibilityString(v provider.Visibility) string {
 	}
 }
 
+// AuthURL implements [provider.Provider]; embeds the token as
+// oauth2:<token> basic auth on https URLs.
 func (p *Provider) AuthURL(u *url.URL) (string, error) {
 	if strings.EqualFold(u.Scheme, "ssh") {
 		return u.String(), nil

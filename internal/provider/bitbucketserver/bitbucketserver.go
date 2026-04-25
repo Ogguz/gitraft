@@ -82,6 +82,7 @@ type Provider struct {
 	client   *http.Client
 }
 
+// Name implements [provider.Provider].
 func (p *Provider) Name() string { return "bitbucket-server" }
 
 // Matches returns true only when this provider has been configured with a
@@ -130,6 +131,9 @@ func (p *Provider) ParseRepo(u *url.URL) (string, string, error) {
 	return "", "", fmt.Errorf("bitbucket-server: URL %q path is not /scm/{project}/{repo} or /projects/{project}/repos/{repo}\nhint: copy the HTTPS clone URL from the repo's Clone dialog (form: /scm/PROJECT/repo.git) OR the URL from your browser's address bar (form: /projects/PROJECT/repos/repo); also confirm --bitbucket-url points at the right server", u)
 }
 
+// RepoExists implements [provider.Provider]. Errors when no host has been
+// configured (Bitbucket Server has no default host, so an unconfigured
+// provider can't be queried).
 func (p *Provider) RepoExists(ctx context.Context, project, repo string) (bool, error) {
 	if err := p.requireConfigured(); err != nil {
 		return false, err
@@ -154,6 +158,9 @@ func (p *Provider) RepoExists(ctx context.Context, project, repo string) (bool, 
 	}
 }
 
+// CreateRepo implements [provider.Provider]. Posts to /projects/<key>/repos
+// with the project key as Owner; treats 409/400 with an "already exists"
+// envelope body as [provider.ErrRepoAlreadyExists] (benign race).
 func (p *Provider) CreateRepo(ctx context.Context, opts provider.CreateOptions) error {
 	if err := p.requireConfigured(); err != nil {
 		return err
@@ -198,6 +205,8 @@ func (p *Provider) CreateRepo(ctx context.Context, opts provider.CreateOptions) 
 	return nil
 }
 
+// AuthURL implements [provider.Provider]; embeds username + HTTP token
+// as basic auth on https URLs.
 func (p *Provider) AuthURL(u *url.URL) (string, error) {
 	if strings.EqualFold(u.Scheme, "ssh") {
 		return u.String(), nil

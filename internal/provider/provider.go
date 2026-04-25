@@ -14,6 +14,9 @@ import (
 // Visibility of a repository. VisibilityUnspecified means "use the provider's default".
 type Visibility int
 
+// Visibility constants. Order is significant only for tests that compare
+// against the iota positions; the user-facing string forms come from
+// [Visibility.String].
 const (
 	VisibilityUnspecified Visibility = iota
 	VisibilityPrivate

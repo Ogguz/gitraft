@@ -64,18 +64,23 @@ type Provider struct {
 	client  *http.Client
 }
 
+// Name implements [provider.Provider].
 func (p *Provider) Name() string { return "github" }
 
+// Matches implements [provider.Provider]; matches github.com and www.github.com.
 func (p *Provider) Matches(u *url.URL) bool {
 	// Hostname strips any port (e.g. github.com:443).
 	h := strings.ToLower(u.Hostname())
 	return h == "github.com" || h == "www.github.com"
 }
 
+// ParseRepo implements [provider.Provider] using the canonical /owner/repo split.
 func (p *Provider) ParseRepo(u *url.URL) (string, string, error) {
 	return provider.SplitPath(u)
 }
 
+// RepoExists implements [provider.Provider]; returns false on 404, error on
+// other non-200 responses.
 func (p *Provider) RepoExists(ctx context.Context, owner, name string) (bool, error) {
 	req, err := p.newRequest(ctx, http.MethodGet, "/repos/"+owner+"/"+name, nil)
 	if err != nil {
@@ -96,6 +101,10 @@ func (p *Provider) RepoExists(ctx context.Context, owner, name string) (bool, er
 	}
 }
 
+// CreateRepo implements [provider.Provider]. Routes to /orgs/<owner>/repos
+// for organization owners and /user/repos when the token-owner matches the
+// requested owner; returns [provider.ErrRepoAlreadyExists] for benign
+// 409/422 races.
 func (p *Provider) CreateRepo(ctx context.Context, opts provider.CreateOptions) error {
 	kind, err := p.ownerKind(ctx, opts.Owner)
 	if err != nil {
@@ -149,6 +158,9 @@ func (p *Provider) CreateRepo(ctx context.Context, opts provider.CreateOptions) 
 	return nil
 }
 
+// AuthURL implements [provider.Provider]; embeds the token as
+// x-access-token basic auth on https URLs, returns the URL unchanged for
+// SSH or unauthenticated runs.
 func (p *Provider) AuthURL(u *url.URL) (string, error) {
 	if strings.EqualFold(u.Scheme, "ssh") {
 		return u.String(), nil

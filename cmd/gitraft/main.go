@@ -1,3 +1,7 @@
+// Command gitraft mirrors a git repository between hosting providers,
+// preserving full history (branches, tags, LFS objects) and auto-creating
+// the destination repo when needed. See README for usage and the
+// internal/cli package for command wiring.
 package main
 
 import (

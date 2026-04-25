@@ -63,8 +63,10 @@ type Provider struct {
 	client      *http.Client
 }
 
+// Name implements [provider.Provider].
 func (p *Provider) Name() string { return "bitbucket" }
 
+// Matches implements [provider.Provider]; matches bitbucket.org and www.bitbucket.org.
 func (p *Provider) Matches(u *url.URL) bool {
 	h := strings.ToLower(u.Hostname())
 	return h == "bitbucket.org" || h == "www.bitbucket.org"
@@ -76,6 +78,7 @@ func (p *Provider) ParseRepo(u *url.URL) (string, string, error) {
 	return provider.SplitPath(u)
 }
 
+// RepoExists implements [provider.Provider]; returns false on 404.
 func (p *Provider) RepoExists(ctx context.Context, workspace, slug string) (bool, error) {
 	req, err := p.newRequest(ctx, http.MethodGet, "/repositories/"+workspace+"/"+slug, nil)
 	if err != nil {
@@ -96,6 +99,9 @@ func (p *Provider) RepoExists(ctx context.Context, workspace, slug string) (bool
 	}
 }
 
+// CreateRepo implements [provider.Provider]. Treats 400/409 with an
+// "already exists" envelope body as [provider.ErrRepoAlreadyExists]
+// (benign race), falls through to [Provider.apiError] otherwise.
 func (p *Provider) CreateRepo(ctx context.Context, opts provider.CreateOptions) error {
 	body := map[string]any{
 		"scm": "git",
@@ -132,6 +138,8 @@ func (p *Provider) CreateRepo(ctx context.Context, opts provider.CreateOptions) 
 	return nil
 }
 
+// AuthURL implements [provider.Provider]; embeds username + app password
+// as basic auth on https URLs.
 func (p *Provider) AuthURL(u *url.URL) (string, error) {
 	if strings.EqualFold(u.Scheme, "ssh") {
 		return u.String(), nil
