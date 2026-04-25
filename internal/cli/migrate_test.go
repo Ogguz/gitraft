@@ -223,11 +223,11 @@ func TestAuthURL_WithProviderUsesProvider(t *testing.T) {
 }
 
 func TestBuildProviders_CreatesAllProviders(t *testing.T) {
-	ps, err := buildProviders("")
+	ps, err := buildProviders("", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"github", "gitlab", "bitbucket"} {
+	for _, name := range []string{"github", "gitlab", "bitbucket", "bitbucket-server"} {
 		if provider.ByName(ps, name) == nil {
 			t.Errorf("expected %q provider in registry", name)
 		}
@@ -235,7 +235,7 @@ func TestBuildProviders_CreatesAllProviders(t *testing.T) {
 }
 
 func TestBuildProviders_GitLabSelfHostedMatches(t *testing.T) {
-	ps, err := buildProviders("https://gitlab.example.com")
+	ps, err := buildProviders("https://gitlab.example.com", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestBuildProviders_GitLabSelfHostedMatches(t *testing.T) {
 func TestBuildProviders_GitLabSelfHostedWithPortMatches(t *testing.T) {
 	// Regression: previously gitlabHost returned Host (with port), but Matches
 	// compared Hostname (without port) — so ":8080" URLs silently never matched.
-	ps, err := buildProviders("https://gitlab.example.com:8080")
+	ps, err := buildProviders("https://gitlab.example.com:8080", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,12 +272,147 @@ func TestBuildProviders_GitLabSelfHostedWithPortMatches(t *testing.T) {
 }
 
 func TestBuildProviders_InvalidGitLabURL(t *testing.T) {
-	_, err := buildProviders("://broken")
+	_, err := buildProviders("://broken", "")
 	if err == nil {
 		t.Fatal("expected error for malformed URL")
 	}
 	if !strings.Contains(err.Error(), "invalid --gitlab-url") {
 		t.Errorf("expected 'invalid --gitlab-url' in error; got %v", err)
+	}
+}
+
+func TestBuildProviders_InvalidBitbucketURL(t *testing.T) {
+	_, err := buildProviders("", "://broken")
+	if err == nil {
+		t.Fatal("expected error for malformed URL")
+	}
+	if !strings.Contains(err.Error(), "invalid --bitbucket-url") {
+		t.Errorf("expected 'invalid --bitbucket-url' in error; got %v", err)
+	}
+}
+
+func TestBuildProviders_BitbucketServerUnconfiguredMatchesNothing(t *testing.T) {
+	ps, err := buildProviders("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bbs := provider.ByName(ps, "bitbucket-server")
+	if bbs == nil {
+		t.Fatal("bitbucket-server provider missing")
+	}
+	u := mustParse(t, "https://bitbucket.example.com/scm/proj/repo.git")
+	if bbs.Matches(u) {
+		t.Error("unconfigured bitbucket-server should not match any URL")
+	}
+}
+
+func TestBuildProviders_BothInvalidURLsAreJoinedErrors(t *testing.T) {
+	// Both flags malformed → caller sees both errors at once, not just the first.
+	_, err := buildProviders("://gl-broken", "://bb-broken")
+	if err == nil {
+		t.Fatal("expected joined error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "--gitlab-url") {
+		t.Errorf("expected gitlab error in joined output; got %v", msg)
+	}
+	if !strings.Contains(msg, "--bitbucket-url") {
+		t.Errorf("expected bitbucket error in joined output; got %v", msg)
+	}
+}
+
+func TestBuildProviders_BothFlagsCombined(t *testing.T) {
+	ps, err := buildProviders("https://gl.example.com", "https://bb.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gl := provider.ByName(ps, "gitlab")
+	bbs := provider.ByName(ps, "bitbucket-server")
+	if gl == nil || bbs == nil {
+		t.Fatal("missing providers")
+	}
+	if !gl.Matches(mustParse(t, "https://gl.example.com/a/b.git")) {
+		t.Error("gitlab should match its configured host")
+	}
+	if !bbs.Matches(mustParse(t, "https://bb.example.com/scm/proj/repo.git")) {
+		t.Error("bitbucket-server should match its configured host")
+	}
+}
+
+func TestBuildProviders_BitbucketServerConfiguredMatches(t *testing.T) {
+	ps, err := buildProviders("", "https://bitbucket.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bbs := provider.ByName(ps, "bitbucket-server")
+	u := mustParse(t, "https://bitbucket.example.com/scm/proj/repo.git")
+	if !bbs.Matches(u) {
+		t.Error("configured bitbucket-server should match its host")
+	}
+	uOther := mustParse(t, "https://bitbucket.org/team/repo.git")
+	if bbs.Matches(uOther) {
+		t.Error("bitbucket-server must not match bitbucket.org")
+	}
+}
+
+func TestParseHostFromURL(t *testing.T) {
+	tests := []struct {
+		in       string
+		flagName string
+		want     string
+		wantErr  bool
+	}{
+		{"", "--flag", "", false},
+		{"https://host.example.com", "--flag", "host.example.com", false},
+		{"https://host.example.com:8080/path", "--flag", "host.example.com", false},
+		{"host.example.com", "--flag", "host.example.com", false},
+		{"host.example.com:8080", "--flag", "host.example.com", false},
+		{"://broken", "--flag", "", true},
+		{"https://", "--flag", "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := parseHostFromURL(tc.in, tc.flagName)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q", tc.in)
+				}
+				if !strings.Contains(err.Error(), tc.flagName) {
+					t.Errorf("error should include flag name; got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("parseHostFromURL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAuthURL_BitbucketServerHintWhenUnconfigured(t *testing.T) {
+	logger, buf := testLogger()
+	u := mustParse(t, "https://bb.internal.corp/scm/PROJ/repo.git")
+	got, err := authURL(nil, u, "https://bb.internal.corp/scm/PROJ/repo.git", logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://bb.internal.corp/scm/PROJ/repo.git" {
+		t.Errorf("expected pass-through; got %q", got)
+	}
+	if !strings.Contains(buf.String(), "--bitbucket-url") {
+		t.Errorf("expected --bitbucket-url hint for BB-Server-shaped URL; got %s", buf.String())
+	}
+}
+
+func TestAuthURL_NoHintForUnrelatedURL(t *testing.T) {
+	logger, buf := testLogger()
+	u := mustParse(t, "https://random.example.com/owner/repo.git")
+	_, _ = authURL(nil, u, u.String(), logger)
+	if strings.Contains(buf.String(), "--bitbucket-url") {
+		t.Errorf("BB-Server hint must not fire for unrelated URLs; got %s", buf.String())
 	}
 }
 
@@ -377,6 +512,32 @@ func TestWarnMissingTokens_NilProviderIgnored(t *testing.T) {
 	warnMissingTokens(logger, nil, &mockProvider{name: "github"})
 	if !strings.Contains(buf.String(), "GITHUB_TOKEN") {
 		t.Errorf("github warning expected despite nil entry; got %s", buf.String())
+	}
+}
+
+func TestWarnMissingTokens_BitbucketServerEitherEnvUnsetWarns(t *testing.T) {
+	cases := []struct {
+		name     string
+		username string
+		token    string
+		warn     bool
+	}{
+		{"both unset", "", "", true},
+		{"username unset", "", "secret", true},
+		{"token unset", "alice", "", true},
+		{"both set", "alice", "secret", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BITBUCKET_SERVER_USERNAME", tc.username)
+			t.Setenv("BITBUCKET_SERVER_TOKEN", tc.token)
+			logger, buf := testLogger()
+			warnMissingTokens(logger, &mockProvider{name: "bitbucket-server"})
+			warned := strings.Contains(buf.String(), "BITBUCKET_SERVER_USERNAME or BITBUCKET_SERVER_TOKEN unset")
+			if warned != tc.warn {
+				t.Errorf("warned = %v; want %v (buf=%s)", warned, tc.warn, buf.String())
+			}
+		})
 	}
 }
 

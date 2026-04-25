@@ -12,6 +12,7 @@ import (
 	"github.com/Ogguz/gitraft/internal/mirror"
 	"github.com/Ogguz/gitraft/internal/provider"
 	"github.com/Ogguz/gitraft/internal/provider/bitbucket"
+	"github.com/Ogguz/gitraft/internal/provider/bitbucketserver"
 	"github.com/Ogguz/gitraft/internal/provider/github"
 	"github.com/Ogguz/gitraft/internal/provider/gitlab"
 	"github.com/spf13/cobra"
@@ -26,6 +27,7 @@ type migrateFlags struct {
 	Description    string
 	SkipCreate     bool
 	GitLabURL      string
+	BitbucketURL   string
 }
 
 func newMigrateCmd() *cobra.Command {
@@ -46,11 +48,12 @@ func newMigrateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.Description, "description", "", "description for an auto-created destination")
 	cmd.Flags().BoolVar(&f.SkipCreate, "skip-create", false, "do not auto-create the destination if it is missing")
 	cmd.Flags().StringVar(&f.GitLabURL, "gitlab-url", "", "self-hosted GitLab base URL (default: https://gitlab.com)")
+	cmd.Flags().StringVar(&f.BitbucketURL, "bitbucket-url", "", "self-hosted Bitbucket Server / Data Center URL (no default; required to engage that provider)")
 	return cmd
 }
 
 func runMigrate(ctx context.Context, srcRaw, dstRaw string, f migrateFlags, logger *slog.Logger) error {
-	providers, err := buildProviders(f.GitLabURL)
+	providers, err := buildProviders(f.GitLabURL, f.BitbucketURL)
 	if err != nil {
 		return err
 	}
@@ -108,17 +111,26 @@ func runMigrate(ctx context.Context, srcRaw, dstRaw string, f migrateFlags, logg
 // buildProviders constructs the set of available providers, configured from
 // env and flags. Does NOT emit token warnings — those are deferred to
 // warnMissingTokens so we only warn for providers the user actually reached.
-func buildProviders(gitlabURL string) ([]provider.Provider, error) {
-	host, err := gitlabHost(gitlabURL)
-	if err != nil {
-		return nil, err
+//
+// Both --gitlab-url and --bitbucket-url are validated; errors are joined so a
+// user with multiple bad flags fixes everything in one round-trip.
+func buildProviders(gitlabURL, bitbucketServerURL string) ([]provider.Provider, error) {
+	gitlabHostname, gErr := gitlabHost(gitlabURL)
+	bbServerHostname, bbErr := bitbucketServerHost(bitbucketServerURL)
+	if gErr != nil || bbErr != nil {
+		return nil, errors.Join(gErr, bbErr)
 	}
 	return []provider.Provider{
 		github.New(github.Options{Token: os.Getenv("GITHUB_TOKEN")}),
-		gitlab.New(gitlab.Options{Token: os.Getenv("GITLAB_TOKEN"), Host: host}),
+		gitlab.New(gitlab.Options{Token: os.Getenv("GITLAB_TOKEN"), Host: gitlabHostname}),
 		bitbucket.New(bitbucket.Options{
 			Username:    os.Getenv("BITBUCKET_USERNAME"),
 			AppPassword: os.Getenv("BITBUCKET_APP_PASSWORD"),
+		}),
+		bitbucketserver.New(bitbucketserver.Options{
+			Host:     bbServerHostname,
+			Username: os.Getenv("BITBUCKET_SERVER_USERNAME"),
+			Token:    os.Getenv("BITBUCKET_SERVER_TOKEN"),
 		}),
 	}, nil
 }
@@ -126,24 +138,26 @@ func buildProviders(gitlabURL string) ([]provider.Provider, error) {
 // providerAuthVars maps provider name to the env vars whose presence enables
 // authenticated API calls. Multiple vars means all are required.
 var providerAuthVars = map[string][]string{
-	"github":    {"GITHUB_TOKEN"},
-	"gitlab":    {"GITLAB_TOKEN"},
-	"bitbucket": {"BITBUCKET_USERNAME", "BITBUCKET_APP_PASSWORD"},
+	"github":           {"GITHUB_TOKEN"},
+	"gitlab":           {"GITLAB_TOKEN"},
+	"bitbucket":        {"BITBUCKET_USERNAME", "BITBUCKET_APP_PASSWORD"},
+	"bitbucket-server": {"BITBUCKET_SERVER_USERNAME", "BITBUCKET_SERVER_TOKEN"},
 }
 
 // providerWarnings is the message emitted when any required env var is unset
 // for that provider. Single message per provider keeps the log compact.
 var providerWarnings = map[string]string{
-	"github":    "GITHUB_TOKEN unset; GitHub API calls will be unauthenticated (public repos only)",
-	"gitlab":    "GITLAB_TOKEN unset; GitLab API calls will be unauthenticated (public projects only)",
-	"bitbucket": "BITBUCKET_USERNAME or BITBUCKET_APP_PASSWORD unset; Bitbucket API calls will be unauthenticated (public repos only)",
+	"github":           "GITHUB_TOKEN unset; GitHub API calls will be unauthenticated (public repos only)",
+	"gitlab":           "GITLAB_TOKEN unset; GitLab API calls will be unauthenticated (public projects only)",
+	"bitbucket":        "BITBUCKET_USERNAME or BITBUCKET_APP_PASSWORD unset; Bitbucket API calls will be unauthenticated (public repos only)",
+	"bitbucket-server": "BITBUCKET_SERVER_USERNAME or BITBUCKET_SERVER_TOKEN unset; Bitbucket Server API calls will be unauthenticated",
 }
 
-// gitlabHost extracts a hostname (no port) from either a URL
+// parseHostFromURL extracts a hostname (no port) from either a full URL
 // ("https://host:8080/path") or a bare hostname ("host" or "host:port").
-// Returns an error for clearly invalid input. Empty input yields empty output,
-// which lets gitlab.New fall back to its default.
-func gitlabHost(raw string) (string, error) {
+// Empty input returns empty output (caller decides what that means).
+// Invalid input returns an error tagged with the originating flag name.
+func parseHostFromURL(raw, flagName string) (string, error) {
 	if raw == "" {
 		return "", nil
 	}
@@ -153,13 +167,24 @@ func gitlabHost(raw string) (string, error) {
 	}
 	u, err := url.Parse(candidate)
 	if err != nil {
-		return "", fmt.Errorf("invalid --gitlab-url %q: %w", raw, err)
+		return "", fmt.Errorf("invalid %s %q: %w", flagName, raw, err)
 	}
 	host := u.Hostname()
 	if host == "" {
-		return "", fmt.Errorf("invalid --gitlab-url %q: no host", raw)
+		return "", fmt.Errorf("invalid %s %q: no host", flagName, raw)
 	}
 	return host, nil
+}
+
+// gitlabHost reads --gitlab-url; empty means "use the gitlab.com default".
+func gitlabHost(raw string) (string, error) {
+	return parseHostFromURL(raw, "--gitlab-url")
+}
+
+// bitbucketServerHost reads --bitbucket-url; empty means "not configured" —
+// the Bitbucket Server provider's Matches will return false for every URL.
+func bitbucketServerHost(raw string) (string, error) {
+	return parseHostFromURL(raw, "--bitbucket-url")
 }
 
 // warnMissingTokens emits one warning per provider in `used` whose required
@@ -244,13 +269,32 @@ func ensureDestination(ctx context.Context, p provider.Provider, u *url.URL, des
 
 // authURL embeds auth into the URL via the provider, or returns the raw input
 // if the provider is nil (unknown host). Warns in the nil case so the user
-// knows auth wasn't applied and can expect opaque git-level failures.
+// knows auth wasn't applied and can expect opaque git-level failures. When
+// the URL shape suggests Bitbucket Server, surface a hint about --bitbucket-url.
 func authURL(p provider.Provider, u *url.URL, raw string, logger *slog.Logger) (string, error) {
 	if p == nil {
-		logger.Warn("no provider matched; pushing without embedded auth — set up SSH keys or a credential helper if needed", "host", u.Host)
+		msg := "no provider matched; pushing without embedded auth — set up SSH keys or a credential helper if needed"
+		if looksLikeBitbucketServerURL(u) {
+			msg += fmt.Sprintf(" — URL looks like Bitbucket Server, try --bitbucket-url=https://%s", u.Host)
+		}
+		logger.Warn(msg, "host", u.Host)
 		return raw, nil
 	}
 	return p.AuthURL(u)
+}
+
+// looksLikeBitbucketServerURL returns true when the URL path matches one of
+// the Bitbucket Server URL shapes (clone or browser). Used to give the user
+// an actionable hint when no provider matched.
+func looksLikeBitbucketServerURL(u *url.URL) bool {
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) >= 3 && parts[0] == "scm" {
+		return true
+	}
+	if len(parts) >= 4 && parts[0] == "projects" && parts[2] == "repos" {
+		return true
+	}
+	return false
 }
 
 func newLogger(v int) *slog.Logger {
