@@ -111,8 +111,5 @@ func Sensitive(key string) bool {
 		}
 	}
 	// "Authorization" is the standard HTTP header name; redact verbatim.
-	if lower == "authorization" {
-		return true
-	}
-	return false
+	return lower == "authorization"
 }

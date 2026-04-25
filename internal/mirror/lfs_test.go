@@ -57,13 +57,25 @@ func TestDetectLFS_PlainRepoReturnsFalse(t *testing.T) {
 
 func TestDetectLFS_AttributeFilterDetected(t *testing.T) {
 	internalRequireGit(t)
+	// Force the attribute-scan fallback path. detectLFS prefers
+	// `git lfs ls-files --all` when git-lfs is available, but a bare repo
+	// seeded only with `.gitattributes` (no actual LFS objects) returns
+	// empty from ls-files even when LFS is configured. To verify the
+	// attribute-scan logic does the right thing, override
+	// isGitLFSAvailable to false so the fallback always runs — without
+	// this override the test is host-state-dependent (passes when
+	// git-lfs is absent, fails when it's installed).
+	origAvail := isGitLFSAvailable
+	t.Cleanup(func() { isGitLFSAvailable = origAvail })
+	isGitLFSAvailable = func(context.Context) bool { return false }
+
 	bare := internalMakeBareRepo(t, internalSeedReadme, internalSeedLFSAttr)
 	used, err := detectLFS(context.Background(), bare)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !used {
-		t.Error("repo with filter=lfs in .gitattributes should be detected as LFS")
+		t.Error("repo with filter=lfs in .gitattributes should be detected as LFS via attribute-scan fallback")
 	}
 }
 
