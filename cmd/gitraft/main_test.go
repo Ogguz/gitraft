@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -39,7 +40,16 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(tmp)
 
-	gitraftBin = filepath.Join(tmp, "gitraft")
+	// Windows requires the .exe extension for `os/exec` to recognize the
+	// binary as executable. Without it `cmd.Run()` succeeds-with-empty
+	// (the OS treats the no-extension file as a non-executable resource
+	// and returns no output rather than ENOEXEC), making the test stream
+	// assertions fail with confusing "got empty" messages.
+	binName := "gitraft"
+	if runtime.GOOS == "windows" {
+		binName = "gitraft.exe"
+	}
+	gitraftBin = filepath.Join(tmp, binName)
 	build := exec.Command("go", "build", "-o", gitraftBin, "./cmd/gitraft")
 	build.Dir = "../.."
 	if out, err := build.CombinedOutput(); err != nil {

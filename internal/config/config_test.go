@@ -289,15 +289,25 @@ func TestLoadOrEmpty_ValidationErrorWraps(t *testing.T) {
 	if !strings.Contains(err.Error(), "validate config") {
 		t.Errorf("expected 'validate config' in wrapping; got %v", err)
 	}
-	if !strings.Contains(err.Error(), path) {
-		t.Errorf("expected file path in error; got %v", err)
+	// The production wrap uses %q to quote the path, which double-escapes
+	// backslashes on Windows (`C:\foo` → `"C:\\foo"`). Assert on the
+	// basename only — it has no separators on any OS, so the substring
+	// check works portably without forking the test on runtime.GOOS.
+	base := filepath.Base(path)
+	if !strings.Contains(err.Error(), base) {
+		t.Errorf("expected file basename %q in error; got %v", base, err)
 	}
 }
 
 func TestDefaultPath_XDGConfigHome(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", "/custom/xdg")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(string(filepath.Separator), "custom", "xdg"))
 	got := config.DefaultPath()
-	want := "/custom/xdg/gitraft/config.yaml"
+	// Expected value is built with filepath.Join so the separator matches
+	// the host OS (forward slashes on Unix, backslashes on Windows).
+	// DefaultPath itself uses filepath.Join internally; mirroring the
+	// constructor here keeps the test portable instead of hard-coding
+	// "/custom/xdg/...".
+	want := filepath.Join(string(filepath.Separator), "custom", "xdg", "gitraft", "config.yaml")
 	if got != want {
 		t.Errorf("DefaultPath() = %q; want %q", got, want)
 	}
