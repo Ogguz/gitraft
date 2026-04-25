@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/Ogguz/gitraft/internal/cli"
+	"github.com/Ogguz/gitraft/internal/redact"
 )
 
 var (
@@ -26,7 +27,10 @@ func main() {
 	root.SilenceErrors = true // we own the error printing below
 
 	if err := root.ExecuteContext(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "gitraft:", err)
+		// Apply URL-userinfo redaction to the error message so embedded
+		// tokens (e.g., from wrapped "clone https://x:tok@host: ..." errors)
+		// don't leak to stderr.
+		fmt.Fprintln(os.Stderr, "gitraft:", redact.String(err.Error()))
 		os.Exit(1)
 	}
 }

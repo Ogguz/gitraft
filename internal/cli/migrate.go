@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/Ogguz/gitraft/internal/config"
 	"github.com/Ogguz/gitraft/internal/mirror"
 	"github.com/Ogguz/gitraft/internal/provider"
+	"github.com/Ogguz/gitraft/internal/redact"
 	"github.com/Ogguz/gitraft/internal/provider/bitbucket"
 	"github.com/Ogguz/gitraft/internal/provider/bitbucketserver"
 	"github.com/Ogguz/gitraft/internal/provider/gitea"
@@ -460,6 +462,14 @@ func looksLikeBitbucketServerURL(u *url.URL) bool {
 }
 
 func newLogger(v int) *slog.Logger {
+	return newLoggerTo(os.Stderr, v)
+}
+
+// newLoggerTo is the testable seam: builds the same handler chain as
+// newLogger but writes to an arbitrary writer. The redact wrap is the whole
+// point of the chain — applied here so a CLI test can assert it actually
+// fires (not just that the redact package works in isolation).
+func newLoggerTo(w io.Writer, v int) *slog.Logger {
 	level := slog.LevelWarn
 	switch {
 	case v == 1:
@@ -467,5 +477,5 @@ func newLogger(v int) *slog.Logger {
 	case v >= 2:
 		level = slog.LevelDebug
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	return slog.New(redact.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})))
 }

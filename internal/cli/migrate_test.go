@@ -897,6 +897,24 @@ func TestBuildProviders_PassesSettingsToProviders(t *testing.T) {
 
 // ---- resolve helper ----
 
+// TestNewLogger_OutputIsRedacted locks in the wiring contract that
+// newLoggerTo (and therefore newLogger) actually applies redact.New around
+// the underlying text handler. The redact package's own tests cover the
+// redaction policy; this test catches a refactor that drops the wrap.
+func TestNewLogger_OutputIsRedacted(t *testing.T) {
+	var buf bytes.Buffer
+	logger := newLoggerTo(&buf, 1) // -v: Info level
+	logger.Info("pushing", "dst", "https://x-access-token:secret-token@github.com/x/y.git")
+
+	out := buf.String()
+	if strings.Contains(out, "secret-token") {
+		t.Errorf("token leaked through CLI logger; got %s", out)
+	}
+	if !strings.Contains(out, "https://redacted@github.com") {
+		t.Errorf("expected URL userinfo redacted; got %s", out)
+	}
+}
+
 func TestResolve_PriorityOrder(t *testing.T) {
 	cases := []struct {
 		name string

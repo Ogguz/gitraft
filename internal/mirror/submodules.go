@@ -3,7 +3,6 @@ package mirror
 import (
 	"bufio"
 	"context"
-	"net/url"
 	"os/exec"
 	"strings"
 )
@@ -89,19 +88,3 @@ func parseGitmodules(content string) []submodule {
 	return result
 }
 
-// redactURL strips userinfo (user:pass) from a URL for safe logging. If the
-// URL doesn't parse, it's returned unchanged — caller may still want to log
-// the raw value so the user can investigate.
-func redactURL(raw string) string {
-	if raw == "" {
-		return raw
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.User == nil {
-		return raw
-	}
-	// Use a single-segment user (no colon) so the URL encoder doesn't have
-	// to percent-encode any reserved chars in the redaction sentinel.
-	u.User = url.User("redacted")
-	return u.String()
-}

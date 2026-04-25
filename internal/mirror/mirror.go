@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+
+	"github.com/Ogguz/gitraft/internal/redact"
 )
 
 // Options configures a single mirror migration.
@@ -78,7 +80,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	for _, m := range mods {
 		logger.Warn("submodule not recursively migrated; only the parent's reference is preserved",
-			"path", m.Path, "url", redactURL(m.URL))
+			"path", m.Path, "url", redact.URL(m.URL))
 	}
 
 	logger.Info("pushing to destination", "dst", opts.Destination)

@@ -165,25 +165,6 @@ func TestParseGitmodules_EmptyValueDropsEntry(t *testing.T) {
 	}
 }
 
-func TestRedactURL(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"", ""},
-		{"https://example.com/x.git", "https://example.com/x.git"},
-		{"https://user:pass@example.com/x.git", "https://redacted@example.com/x.git"},
-		{"https://token@example.com/x.git", "https://redacted@example.com/x.git"},
-		{"git@example.com:org/repo.git", "git@example.com:org/repo.git"}, // not a parseable URL with userinfo; passes through
-	}
-	for _, tc := range cases {
-		t.Run(tc.in, func(t *testing.T) {
-			if got := redactURL(tc.in); got != tc.want {
-				t.Errorf("redactURL(%q) = %q; want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
 
 // internalSeedGitmodules adds a .gitmodules file (without actually configuring
 // a real submodule) so listSubmodules can parse it. Submodule add would
