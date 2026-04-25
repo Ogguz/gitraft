@@ -53,6 +53,15 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         go: ["1.23"]
     runs-on: ${{ matrix.os }}
+    # Force bash everywhere. The default Windows shell is PowerShell,
+    # which mis-parses Go's `./...` and `=value` flag syntax (the test
+    # step fails with "no required module provides package .out" because
+    # pwsh splits `coverage.out` into `coverage` + `.out`). Bash is
+    # available on every GitHub runner image — Git for Windows ships it
+    # under the same `bash` invocation that Linux/macOS use.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
