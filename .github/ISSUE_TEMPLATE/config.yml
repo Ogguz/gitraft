@@ -1,0 +1,11 @@
+# Disables the "Open a blank issue" link so contributors are nudged toward
+# a structured template — bug or feature. The Discussions tab handles
+# open-ended questions and ideas.
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/Ogguz/gitraft/discussions
+    about: Use Discussions for usage questions, ideas, and migration-strategy advice that aren't bug reports.
+  - name: Security report
+    url: https://github.com/Ogguz/gitraft/security/advisories/new
+    about: Report a security vulnerability privately. Please do NOT open a public issue for security reports.

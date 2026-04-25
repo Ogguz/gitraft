@@ -1,1 +1,13 @@
+# Default reviewer for all paths. Specific paths below are highlighted
+# defensively — even though the same person reviews everything today,
+# splitting the rules makes the privileged paths visible at a glance and
+# survives a future maintainer joining without context.
 * @Ogguz
+
+# Files with access to release secrets (id-token signing, tap PAT). A
+# malicious PR that tweaks the release workflow could exfiltrate the tap
+# token or sign attacker-supplied binaries — explicit ownership on these
+# paths flags any change for extra scrutiny rather than rubber-stamping
+# alongside a doc update.
+/.github/workflows/release.yml @Ogguz
+/.goreleaser.yml @Ogguz

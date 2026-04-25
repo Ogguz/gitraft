@@ -1,0 +1,69 @@
+name: Release
+
+# Triggered by pushing a tag of the form v* (e.g. v1.0.0, v1.0.0-rc1).
+# The release workflow MUST stay separate from CI: CI runs on every PR and
+# branch push (high-frequency, no secrets); release runs only on tag push
+# (low-frequency, with secrets for tap+cosign+SBOM). Combining them would
+# expose tap-write tokens to PR contributors via fork CI.
+on:
+  push:
+    tags:
+      - "v*"
+
+# id-token: write — required for keyless cosign signing via Sigstore Fulcio
+#   (the workflow trades its OIDC token for a short-lived signing certificate).
+# contents: write — required so goreleaser can create the GitHub release and
+#   upload archives.
+# packages: write — reserved for future container image publishing; harmless
+#   to grant ahead of time.
+permissions:
+  id-token: write
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: goreleaser
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          # goreleaser's changelog generation walks back to the previous
+          # tag — without full history it would generate an empty section.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      # cosign 2.x is required for the --yes flag goreleaser passes; the
+      # action pins to a known-good release rather than installing latest
+      # (so a Sigstore release with a breaking flag change can't fail us
+      # silently).
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
+        with:
+          cosign-release: "v2.4.1"
+
+      # syft for SBOM generation. Like cosign, pinned to a stable release.
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0.17.7
+
+      - name: Run goreleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          # GITHUB_TOKEN: default-issued by Actions, scoped to this repo.
+          # Sufficient for creating the release + uploading archives.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GORELEASER_TAP_TOKEN: fine-grained PAT scoped Contents:write on
+          # Ogguz/homebrew-tap. Stored in repo secrets. NOT the same as
+          # GITHUB_TOKEN because that token can't push to a different repo
+          # under the same owner.
+          GORELEASER_TAP_TOKEN: ${{ secrets.GORELEASER_TAP_TOKEN }}

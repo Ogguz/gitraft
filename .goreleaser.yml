@@ -1,0 +1,193 @@
+# goreleaser config for gitraft.
+#
+# Triggered by `git tag vX.Y.Z && git push --tags` from the release workflow
+# (.github/workflows/release.yml). Produces:
+#
+#   - Cross-compiled binaries: linux / darwin / windows × amd64 / arm64
+#     (windows-arm64 omitted; very small audience for a CLI today).
+#   - tar.gz archives for unix, zip for windows (matching ecosystem
+#     conventions so `tar xzf` and unzip "just work").
+#   - SHA256 checksums file (gitraft_X.Y.Z_checksums.txt).
+#   - cosign signatures for every artifact (keyless OIDC; Sigstore Fulcio).
+#   - SPDX SBOM per archive via syft (supply-chain provenance).
+#   - Homebrew formula auto-pushed to Ogguz/homebrew-tap so
+#     `brew install Ogguz/gitraft/gitraft` resolves to the latest tag.
+#
+# Why these choices:
+#   - Static linking via CGO_ENABLED=0 means the binary works on any libc /
+#     musl Linux without surprises.
+#   - The -trimpath + -s -w ldflags shrink the binary and strip absolute
+#     paths from stack traces (privacy + reproducibility).
+#   - Version metadata is injected via -X main.{version,commit,date} so
+#     `gitraft --version` prints something useful in bug reports without
+#     hard-coding values in source.
+version: 2
+
+project_name: gitraft
+
+before:
+  hooks:
+    # Verify go.sum integrity without mutating it. `go mod tidy` would
+    # also work but can rewrite go.sum mid-release if a transitive dep's
+    # checksum drifted — that produces a release artifact whose deps
+    # don't match the tagged commit. `verify` is read-only and fails
+    # loudly if the lockfile is out of sync, which is what we want.
+    - go mod verify
+
+builds:
+  - id: gitraft
+    main: ./cmd/gitraft
+    binary: gitraft
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.CommitDate}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # Skip windows/arm64: niche, and the windows runner image cross-
+      # compile path occasionally regresses with toolchain bumps. Add back
+      # if a user files an issue.
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: gitraft
+    # Use {{ .ConventionalFileName }} so the archive names stay
+    # predictable: gitraft_1.0.0_linux_amd64.tar.gz / .zip.
+    # Each `{{- ... }}` strips preceding whitespace including the
+    # newline-as-space introduced by the `>-` folded scalar — so the
+    # rendered template becomes one tight string like
+    # "gitraft_1.0.0_linux_amd64". The else-branch uses `{{- .Arch -}}`
+    # (both-sided strip) so a future arch added to goarch doesn't leak
+    # a stray space into the archive name.
+    name_template: >-
+      {{- .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}amd64
+      {{- else if eq .Arch "arm64" }}arm64
+      {{- else }}{{- .Arch -}}{{ end }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+      # Note: ROADMAP.md is local-only (gitignored), so it is intentionally
+      # NOT shipped in the archive. The upstream roadmap lives on GitHub
+      # milestones and the tracker, both of which are referenced from the
+      # README.
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+# SBOM via syft — one .spdx.sbom.json per archive. Feeds supply-chain tools
+# (Dependency-Track, GitHub's Dependency Graph) and gives downstream users a
+# package-level audit trail.
+sboms:
+  - artifacts: archive
+    documents:
+      - "${artifact}.sbom.spdx.json"
+
+# Keyless cosign signing. Identity comes from the GitHub Actions OIDC
+# token; no long-lived signing key is stored. Verification command lives
+# in README.md; the certificate-identity must match
+# .github/workflows/release.yml — if you rename the workflow, update the
+# README too.
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - "sign-blob"
+      - "--yes" # required since cosign 2.0; opts out of the prompt
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+    # Sign archives and the checksum file; SBOMs are signed transitively
+    # (the SBOM is included in the archive). Signing every individual
+    # artifact (`all`) would also sign the checksum's checksum, which is
+    # redundant and noise for downstream verifiers.
+    artifacts: archive
+  - cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - "sign-blob"
+      - "--yes"
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+    artifacts: checksum
+
+# Homebrew tap publishing. GORELEASER_TAP_TOKEN must be set in the release
+# workflow's secrets — a fine-grained PAT scoped to Contents:write on
+# Ogguz/homebrew-tap (and only that repo).
+brews:
+  - name: gitraft
+    repository:
+      owner: Ogguz
+      name: homebrew-tap
+      token: "{{ .Env.GORELEASER_TAP_TOKEN }}"
+    homepage: "https://github.com/Ogguz/gitraft"
+    description: "Migrate a git repository between hosts with full history, LFS, and submodule warnings"
+    license: "MIT"
+    test: |
+      # Run --version and assert the output matches gitraft's distinctive
+      # version-string format `<ver> (commit <sha>, built <date>)`. Without
+      # the assert_match, a tap update that shipped the wrong binary (e.g.,
+      # a name collision with an unrelated CLI that also accepts --version)
+      # would still pass `brew test`. The "(commit" + "built" pair is
+      # specific enough to be unique to this project.
+      output = shell_output("#{bin}/gitraft --version")
+      assert_match "(commit", output
+      assert_match "built", output
+    install: |
+      bin.install "gitraft"
+
+release:
+  github:
+    owner: Ogguz
+    name: gitraft
+  # Draft = false so tags directly publish; pre-release auto-detected from
+  # tag suffixes like v1.0.0-rc1 (goreleaser's default heuristic).
+  draft: false
+  # The body is generated from CHANGELOG entries + the autoincluded asset
+  # table; no custom template needed for v1.
+
+changelog:
+  # Group commits by conventional-commit type when possible. Falls back to
+  # listing all commits since the previous tag for non-conventional repos.
+  use: github
+  sort: asc
+  groups:
+    - title: "Features"
+      regexp: "^.*feat[(\\w)]*:+.*$"
+      order: 0
+    - title: "Bug fixes"
+      regexp: "^.*fix[(\\w)]*:+.*$"
+      order: 1
+    - title: "Other"
+      order: 999
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"

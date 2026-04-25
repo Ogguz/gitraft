@@ -6,8 +6,20 @@ on:
   pull_request:
     branches: [master, main]
 
+# Cancel in-flight runs of the same branch when a new push lands. Saves CI
+# minutes on rapid push cycles without losing the last result on master.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   lint:
+    # Lint runs once on the lowest supported Go version — language-level
+    # findings don't change between OSes, so a matrix here would just
+    # multiply golangci-lint cache misses.
     name: Lint
     runs-on: ubuntu-latest
     steps:
@@ -15,18 +27,57 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23"
+          cache: true
       - uses: golangci/golangci-lint-action@v6
         with:
           version: v1.62
 
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }}, Go ${{ matrix.go }})
+    # Matrix covers Linux/macOS/Windows on the project's minimum-supported
+    # Go version. go.mod currently pins go 1.23.0; an earlier matrix that
+    # included Go 1.22 was dropped because go.mod's directive blocks
+    # Go 1.22 from compiling at all (`go.mod requires go >= 1.23.0`).
+    # When a future minor adds a 1.24 toolchain, add 1.24 here while
+    # keeping 1.23 so we catch accidental use of post-1.23 stdlib
+    # features that would shrink the install base.
+    #
+    # Windows is included because gitraft's TMPDIR / temp-file paths and
+    # provider URL handling have OS-specific edges that Linux-only CI
+    # would miss.
+    strategy:
+      # Don't fail-fast: a flake on one matrix cell shouldn't hide regressions
+      # on the others.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go: ["1.23"]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: ${{ matrix.go }}
+          cache: true
+      - name: Ensure git-lfs is available
+        # Several mirror tests exercise LFS detection paths; on Windows
+        # runners git-lfs ships with the bundled Git so this is a no-op,
+        # but on macOS the runner image rotates and may or may not have
+        # it pre-installed. Linux runners always have git-lfs.
+        if: runner.os == 'macOS'
+        run: brew install git-lfs || true
       - run: go mod download
       - run: go build ./...
-      - run: go test -race -coverprofile=coverage.out ./...
+      - name: Run tests
+        # -race detects data races in the spinner / mirror.Run goroutine
+        # paths. -coverprofile feeds the artifact upload below (Linux only
+        # to avoid duplicate uploads across the OS matrix).
+        run: go test -race -coverprofile=coverage.out ./...
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: warn
+          retention-days: 7

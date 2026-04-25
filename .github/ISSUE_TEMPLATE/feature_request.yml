@@ -1,0 +1,51 @@
+name: Feature request
+description: Something gitraft should do that it doesn't.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. gitraft's scope is deliberately narrow
+        (mirror migration; nothing about issues/PRs/wikis until v2/v3) —
+        please skim the [roadmap milestones](https://github.com/Ogguz/gitraft/milestones)
+        to see if your request is already planned.
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: What are you trying to accomplish?
+      description: |
+        A description of the migration scenario or workflow. "Use case before
+        implementation" — knowing the goal helps us pick a design that
+        generalizes vs. one that fits one repo.
+      placeholder: |
+        I'm migrating ~200 repos from Bitbucket Cloud to GitLab self-hosted
+        and want to preserve the original visibility (private vs public)
+        rather than always pushing as private.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution (optional)
+      description: |
+        If you have a specific flag, command, or behavior in mind. Skip this
+        if you'd rather discuss the use case first.
+      placeholder: |
+        New flag `--inherit-visibility` that copies the source repo's
+        visibility setting to the destination, falling back to `--visibility`
+        if the source provider doesn't expose it.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        Workarounds you've tried, or related tools that handle this differently.
+
+  - type: input
+    id: provider
+    attributes:
+      label: Affected provider(s) (if any)
+      description: e.g., "GitLab", "Bitbucket Cloud + Server", "all"

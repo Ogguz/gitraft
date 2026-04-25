@@ -1,0 +1,112 @@
+name: Bug report
+description: Something gitraft did wrong, hung on, or crashed during.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The fields below match what's most useful for
+        triaging migration issues — provider/auth combos, OS, and the exact
+        error are usually enough to reproduce.
+
+  - type: input
+    id: version
+    attributes:
+      label: gitraft version
+      description: Output of `gitraft --version`
+      placeholder: "v1.0.0 (commit abc123, built 2026-04-25)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other (specify in details)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source-provider
+    attributes:
+      label: Source provider
+      options:
+        - GitHub
+        - GitHub Enterprise Server
+        - GitLab.com
+        - GitLab self-hosted
+        - Bitbucket Cloud
+        - Bitbucket Server / Data Center
+        - Gitea
+        - Other / not applicable
+    validations:
+      required: true
+
+  - type: dropdown
+    id: dest-provider
+    attributes:
+      label: Destination provider
+      options:
+        - GitHub
+        - GitHub Enterprise Server
+        - GitLab.com
+        - GitLab self-hosted
+        - Bitbucket Cloud
+        - Bitbucket Server / Data Center
+        - Gitea
+        - Other / not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+      description: |
+        Paste the command. gitraft scrubs tokens from logs but not from your
+        shell history — please redact tokens manually before submitting.
+      render: bash
+      placeholder: |
+        gitraft migrate \
+          https://github.com/example/repo.git \
+          https://gitlab.com/example/repo.git
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: gitraft output
+      description: |
+        Paste the full output. If it reproduces under `--json`, the JSON
+        line is more useful than rephrased prose.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect gitraft to do?
+    validations:
+      required: true
+
+  - type: input
+    id: git-lfs
+    attributes:
+      label: git-lfs version (if relevant)
+      description: Output of `git lfs version`. Skip if your repo doesn't use LFS.
+      placeholder: "git-lfs/3.4.0"
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: |
+        Steps to reproduce, screenshots, links to related issues — anything
+        you think might help.
