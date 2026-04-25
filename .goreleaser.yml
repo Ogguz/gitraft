@@ -110,34 +110,28 @@ sboms:
 # .github/workflows/release.yml — if you rename the workflow, update the
 # README too.
 signs:
-  # Two sign blocks (one for archives, one for the checksum file) so
-  # downstream verifiers don't have to deal with redundant signatures-
-  # of-signatures (signing `all` would also sign the checksum file's
-  # signature/certificate). Each block needs a unique `id` because
-  # goreleaser keys configurations by it; both defaulting to "default"
-  # produces "found 2 signs with the ID 'default'" at release time.
-  - id: archives
-    cmd: cosign
+  # Single sign block covering archives, checksum file, and SBOMs.
+  #
+  # An earlier draft split this into two blocks (archives vs. checksum)
+  # to avoid signing-of-signatures, but `artifacts: all` in goreleaser
+  # only matches first-class artifacts (archives, checksums, sboms,
+  # binaries, packages, installers, manifests) — it does NOT include
+  # the .sig/.pem outputs goreleaser itself produces, so signatures-
+  # of-signatures was never actually a risk. The split also caused
+  # parallel cosign processes to collide on the Fulcio CTFE cache
+  # ("creating cached local store: resource temporarily unavailable"),
+  # which broke the release at the signing step. One block runs
+  # serially, hits the cache once, and finishes cleanly.
+  - cmd: cosign
     signature: "${artifact}.sig"
     certificate: "${artifact}.pem"
     args:
       - "sign-blob"
-      - "--yes" # required since cosign 2.0; opts out of the prompt
+      - "--yes" # required since cosign 2.0; opts out of the interactive prompt
       - "--output-certificate=${certificate}"
       - "--output-signature=${signature}"
       - "${artifact}"
-    artifacts: archive
-  - id: checksums
-    cmd: cosign
-    signature: "${artifact}.sig"
-    certificate: "${artifact}.pem"
-    args:
-      - "sign-blob"
-      - "--yes"
-      - "--output-certificate=${certificate}"
-      - "--output-signature=${signature}"
-      - "${artifact}"
-    artifacts: checksum
+    artifacts: all
 
 # Homebrew tap publishing. GORELEASER_TAP_TOKEN must be set in the release
 # workflow's secrets — a fine-grained PAT scoped to Contents:write on
